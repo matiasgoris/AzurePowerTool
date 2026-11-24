@@ -1,0 +1,8 @@
+@foreach (var warning in Items)
+{
+    <div class="alert warning">@warning</div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<string> Items { get; set; } = [];
+}

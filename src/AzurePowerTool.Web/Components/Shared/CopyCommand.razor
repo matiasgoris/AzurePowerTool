@@ -1,0 +1,20 @@
+@inject IJSRuntime JS
+
+<div class="cmd">
+    <code class="mono">@Command</code>
+    <button class="btn tiny" title="Kopiëren" @onclick="CopyAsync">@(_copied ? "✓" : "Kopieer")</button>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Command { get; set; } = "";
+
+    private bool _copied;
+
+    private async Task CopyAsync()
+    {
+        _copied = await JS.InvokeAsync<bool>("powerTool.copyText", Command);
+        if (!_copied) return;
+        await Task.Delay(1500);
+        _copied = false;
+    }
+}

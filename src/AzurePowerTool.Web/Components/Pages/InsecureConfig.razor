@@ -1,0 +1,139 @@
+@page "/insecure-config"
+@inherits ReportPageBase<ConfigFinding>
+@inject InsecureConfigReport Report
+
+<PageTitle>Onveilige configuratie · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Onveilige configuratie</h1>
+        <p class="lead">Beveiligingsinstellingen van storage accounts, Key Vaults, App Services / Function Apps en SQL servers.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <ReportToolbar Running="Running" Status="@Status" HasResult="Result is not null" OnRun="RunAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterMulti Label="Regio's" Options="RegionOptions" Selected="SelectedRegions" OnChanged="StateHasChanged" />
+            <SeverityFilter @bind-Value="MinSeverity" />
+            <FilterChecks Label="Type" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Resource, check, resourcegroep…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        <p class="summary">
+            <strong>@Filtered.Count</strong> bevinding(en)
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="sortable" @onclick='() => SortBy("severity")'>Ernst@(SortIndicator("severity"))</th>
+                            <th class="sortable" @onclick='() => SortBy("check")'>Check@(SortIndicator("check"))</th>
+                            <th class="sortable" @onclick='() => SortBy("resource")'>Resource@(SortIndicator("resource"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th>Nu → gewenst</th>
+                            <th>Fix</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var f in Filtered)
+                        {
+                            <tr>
+                                <td><SeverityBadge Value="f.Severity" /></td>
+                                <td><strong>@f.Check</strong><div class="muted small">@f.Category</div></td>
+                                <td>
+                                    <a href="@Portal.ResourceUrl(Session.Account!.TenantId, f.Resource.Id)" target="_blank" rel="noopener">@f.Resource.Name</a>
+                                    <div class="muted small">@f.Resource.ResourceGroup</div>
+                                    @if (f.Nsp is { } nsp)
+                                    {
+                                        <span class="badge @(nsp.IsEnforced ? "ok" : "warn")" title="Network security perimeter">NSP @nsp.Label</span>
+                                    }
+                                </td>
+                                <td>@f.Resource.SubscriptionName</td>
+                                <td class="small">@f.Current → <strong>@f.Expected</strong></td>
+                                <td class="small">
+                                    @if (f.Impact is not null) { <div class="muted">⚠ @f.Impact</div> }
+                                    <CopyCommand Command="@f.AzCli" />
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Eén Resource Graph-query haalt de instellingen op en de tool vergelijkt ze met de aanbevolen waarden:
+            <ul>
+                <li><strong>Storage:</strong> anonieme blob-toegang, HTTPS-only, minimale TLS, netwerktoegang, account keys/SAS.</li>
+                <li><strong>Key Vault:</strong> purge protection, netwerktoegang, RBAC in plaats van access policies.</li>
+                <li><strong>App Service / Function App:</strong> HTTPS-only.</li>
+                <li><strong>SQL server:</strong> publieke netwerktoegang, minimale TLS.</li>
+            </ul>
+            Resources in een <strong>network security perimeter</strong> in <em>Enforced</em>-modus gelden als netwerkveilig: daarvoor worden de netwerkchecks niet gemeld.
+            Staat de koppeling nog op <em>Learning</em>, dan is de fix de perimeter op Enforced zetten.
+            Begin met <em>Hoog</em>: die fixes zijn meestal veilig. Lees bij de rest eerst de impact, want sommige wijzigingen breken applicaties.
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    protected override Task<ReportResult<ConfigFinding>> ExecuteAsync(IProgress<string> progress, CancellationToken ct) =>
+        Report.RunAsync(progress, ct);
+
+    protected override Func<ConfigFinding, string?> RegionSelector => f => f.Resource.Location;
+    protected override Func<ConfigFinding, (string? Key, string? Label)> SubscriptionSelector =>
+        f => (f.Resource.SubscriptionId, f.Resource.SubscriptionName);
+
+    protected override Func<ConfigFinding, Severity> SeveritySelector => f => f.Severity;
+
+    protected override Func<ConfigFinding, string?> TypeSelector => f => f.Category;
+
+    protected override IComparable? SortValue(ConfigFinding f, string key) => key switch
+    {
+        "severity" => (int)f.Severity,
+        "check" => $"{f.Category}/{f.Check}",
+        "resource" => f.Resource.Name.ToLowerInvariant(),
+        "subscription" => f.Resource.SubscriptionName.ToLowerInvariant(),
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(ConfigFinding f) =>
+        [f.Check, f.Category, f.Resource.Name, f.Resource.ResourceGroup, f.Resource.SubscriptionName, f.Current, f.Nsp?.Label];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Severity", "Category", "Check", "Resource", "ResourceGroup", "Subscription", "Location", "Current", "Expected", "Impact", "Nsp", "NspAccessMode", "ResourceId", "AzCli"],
+            Filtered.Select(f => new[]
+            {
+                f.Severity.Label(), f.Category, f.Check, f.Resource.Name, f.Resource.ResourceGroup, f.Resource.SubscriptionName, f.Resource.Location,
+                f.Current, f.Expected, f.Impact, f.Nsp?.PerimeterName, f.Nsp?.AccessMode, f.Resource.Id, f.AzCli,
+            }));
+        await DownloadCsvAsync($"onveilige-configuratie-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

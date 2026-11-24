@@ -1,0 +1,27 @@
+@using AzurePowerTool.Core.Http
+@inject BrowserSession Session
+
+@if (Error is not null)
+{
+    <div class="alert error" role="alert">
+        <strong>Er liep iets mis.</strong>
+        <div>@Describe(Error)</div>
+        @if (Error is ReauthenticationRequiredException)
+        {
+            <button class="btn primary" style="margin-top:.5rem" @onclick="SignInAgain">Opnieuw aanmelden</button>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public Exception? Error { get; set; }
+
+    private async Task SignInAgain() => await Session.ReauthenticateAsync();
+
+    private static string Describe(Exception ex) => ex switch
+    {
+        AzureApiException api when api.IsForbidden => $"Geen toegang ({(int)api.Status} {api.Code}): {api.ApiMessage}",
+        AzureApiException api => $"Azure gaf een fout ({(int)api.Status} {api.Code}): {api.ApiMessage}",
+        _ => ex.Message,
+    };
+}

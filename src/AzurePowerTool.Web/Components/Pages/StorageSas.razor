@@ -1,0 +1,460 @@
+@page "/storage-sas"
+@inherits ReportPageBase<StorageSasUsage>
+@inject StorageSasUsageReport Report
+@inject AcknowledgementStore Acknowledgements
+
+<PageTitle>SAS-gebruik op storage · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>SAS-gebruik op storage</h1>
+        <p class="lead">Storage accounts waar SAS-tokens aan staan, en of er ook echt met SAS of account keys aangemeld wordt.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <div class="filters">
+        <label class="filter-select">
+            <span class="label">Periode</span>
+            <select class="input" @bind="_days" disabled="@Running">
+                <option value="7">Laatste 7 dagen</option>
+                <option value="30">Laatste 30 dagen</option>
+                <option value="@StorageSasUsageReport.MaxDays">Laatste @StorageSasUsageReport.MaxDays dagen</option>
+            </select>
+        </label>
+    </div>
+
+    <ReportToolbar Running="@(Running || _bulkRunning)" Status="@Status" HasResult="Result is not null" OnRun="RunReportAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterMulti Label="Regio's" Options="RegionOptions" Selected="SelectedRegions" OnChanged="StateHasChanged" />
+            <FilterChecks Label="Status" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Naam, resourcegroep, subscription, sourcecode…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (Acknowledgements.IsEnabled)
+            {
+                <label class="filter-select">
+                    <span class="label">Aanvaard</span>
+                    <select class="input @(_ackView != AckView.Open ? "active" : "")" @bind="_ackView">
+                        <option value="@AckView.Open">Niet aanvaard (@(Result.Items.Count - AcknowledgedCount))</option>
+                        <option value="@AckView.Accepted">Alleen aanvaard (@AcknowledgedCount)</option>
+                        <option value="@AckView.All">Alle (@Result.Items.Count)</option>
+                    </select>
+                </label>
+            }
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        @if (Acknowledgements.IsEnabled && (SelectedVisible.Count > 0 || _bulkRunning))
+        {
+            <div class="bulk-bar">
+                @if (_bulkRunning)
+                {
+                    <span class="muted">@_bulkStatus</span>
+                }
+                else
+                {
+                    <strong>@SelectedVisible.Count geselecteerd</strong>
+                    <input class="input" placeholder="Reden voor alle geselecteerde (optioneel)" maxlength="500" @bind="_bulkReason" @bind:event="oninput" />
+                    <button class="btn primary" @onclick="AcknowledgeSelectedAsync">Aanvaarden</button>
+                    <button class="btn link" @onclick="() => _selected.Clear()">Selectie wissen</button>
+                }
+            </div>
+        }
+        @if (_ackError is not null)
+        {
+            <div class="alert error">@_ackError</div>
+        }
+        <p class="summary">
+            <strong>@Filtered.Count</strong> storage account(s)
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            @if (AcknowledgedCount > 0 && _ackView == AckView.Open) { <span class="muted"> · @AcknowledgedCount aanvaard en verborgen</span> }
+            <span class="muted"> · periode @_ranDays dagen · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            @if (Acknowledgements.IsEnabled)
+                            {
+                                <th class="select-col">
+                                    @if (SelectableVisible.Count > 0)
+                                    {
+                                        <input type="checkbox" title="Alles (zichtbaar en nog niet aanvaard) selecteren" disabled="@_bulkRunning"
+                                               checked="@(SelectedVisible.Count == SelectableVisible.Count)" @onchange="ToggleAll" />
+                                    }
+                                </th>
+                            }
+                            <th class="sortable" @onclick='() => SortBy("state")'>Status@(SortIndicator("state"))</th>
+                            <th class="sortable" @onclick='() => SortBy("resource")'>Storage account@(SortIndicator("resource"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th class="sortable" @onclick='() => SortBy("source")'>Sourcecode@(SortIndicator("source"))</th>
+                            <th class="sortable" @onclick='() => SortBy("sas")'>SAS-requests@(SortIndicator("sas"))</th>
+                            <th class="sortable" @onclick='() => SortBy("key")'>Account key@(SortIndicator("key"))</th>
+                            <th class="sortable" @onclick='() => SortBy("oauth")'>Entra ID@(SortIndicator("oauth"))</th>
+                            <th class="sortable" @onclick='() => SortBy("last")'>Laatste SAS@(SortIndicator("last"))</th>
+                            <th>Instellingen</th>
+                            @if (Acknowledgements.IsEnabled) { <th>Actie</th> }
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var u in Filtered)
+                        {
+                            var id = u.Resource.Id;
+                            var ack = _acks.GetValueOrDefault(id);
+                            <tr class="@(ack is not null ? "acknowledged" : _selected.Contains(id) ? "selected" : null)">
+                                @if (Acknowledgements.IsEnabled)
+                                {
+                                    <td class="select-col">
+                                        @if (ack is null)
+                                        {
+                                            <input type="checkbox" disabled="@(_bulkRunning || _ackBusy.Contains(id))"
+                                                   checked="@_selected.Contains(id)" @onchange="e => Toggle(id, e)" />
+                                        }
+                                    </td>
+                                }
+                                <td><span class="badge @BadgeClass(u.State)">@u.StateLabel</span></td>
+                                <td>
+                                    <a href="@Portal.ResourceUrl(Session.Account!.TenantId, u.Resource.Id)" target="_blank" rel="noopener">@u.Resource.Name</a>
+                                    <div class="muted small">@u.Resource.ResourceGroup · @u.Resource.Location</div>
+                                </td>
+                                <td>@u.Resource.SubscriptionName</td>
+                                <td class="small">
+                                    @if (u.SourceCode is not { } source)
+                                    {
+                                        <span class="muted">–</span>
+                                    }
+                                    else if (Uri.TryCreate(source, UriKind.Absolute, out var sourceUri) && (sourceUri.Scheme == Uri.UriSchemeHttps || sourceUri.Scheme == Uri.UriSchemeHttp))
+                                    {
+                                        <a href="@sourceUri" target="_blank" rel="noopener" title="@source">@SourceLabel(sourceUri)</a>
+                                    }
+                                    else
+                                    {
+                                        <span>@source</span>
+                                    }
+                                </td>
+                                @if (u.State == SasUsageState.Unknown)
+                                {
+                                    <td colspan="4" class="muted small">Metrics niet beschikbaar</td>
+                                }
+                                else
+                                {
+                                    <td>
+                                        @u.SasRequests.ToString("N0")
+                                        @if (u.DelegationSasRequests > 0)
+                                        {
+                                            <div class="muted small">+ @u.DelegationSasRequests.ToString("N0") user delegation</div>
+                                        }
+                                    </td>
+                                    <td>@u.AccountKeyRequests.ToString("N0")</td>
+                                    <td>
+                                        @u.OAuthRequests.ToString("N0")
+                                        @if (u.AnonymousRequests > 0)
+                                        {
+                                            <div class="muted small">@u.AnonymousRequests.ToString("N0") anoniem</div>
+                                        }
+                                    </td>
+                                    <td>@(u.LastSasUse is { } last ? last.ToLocalTime().ToString("dd/MM/yyyy") : "—")</td>
+                                }
+                                <td class="small">
+                                    @if (u.SharedKeyAllowed)
+                                    {
+                                        <div>Shared key aan · SAS-vervalbeleid: @(u.SasExpirationPeriod ?? "geen")</div>
+                                    }
+                                    else
+                                    {
+                                        <div>Shared key uit (alleen user delegation SAS)</div>
+                                    }
+                                    @if (u.AzCliDisableSharedKey is { } cli)
+                                    {
+                                        <div class="muted">Niet gebruikt in deze periode: kan uit.</div>
+                                        <CopyCommand Command="@cli" />
+                                    }
+                                </td>
+                                @if (Acknowledgements.IsEnabled)
+                                {
+                                    <td class="action-cell">
+                                        <div class="ack-cell">
+                                            @if (_ackBusy.Contains(id))
+                                            {
+                                                <span class="muted small">Bezig…</span>
+                                            }
+                                            else if (ack is not null)
+                                            {
+                                                <div><span class="badge ok">Aanvaard</span></div>
+                                                <div class="muted small">@ack.AcknowledgedBy · @ack.AcknowledgedAt.ToLocalTime().ToString("yyyy-MM-dd")</div>
+                                                @if (ack.Reason is not null) { <div class="small">@ack.Reason</div> }
+                                                <button class="btn tiny" @onclick="() => RevokeAsync(u)">Intrekken</button>
+                                            }
+                                            else if (_ackEditId == id)
+                                            {
+                                                <input class="input small" placeholder="Reden (optioneel)" maxlength="500" @bind="_ackReason" @bind:event="oninput" />
+                                                <div class="row-actions" style="justify-content:flex-start;margin-top:.3rem">
+                                                    <button class="btn tiny primary" @onclick="() => AcknowledgeAsync(u)">Bevestig</button>
+                                                    <button class="btn tiny" @onclick="() => _ackEditId = null">Annuleer</button>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn tiny" title="Bewust zo laten: niet meer tonen in dit overzicht" @onclick="() => StartAcknowledge(id)">Aanvaarden</button>
+                                            }
+                                        </div>
+                                    </td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Kies een periode en klik op <strong>Rapport uitvoeren</strong>. Per storage account wordt de Azure Monitor-metric <em>Transactions</em>
+            opgesplitst per authenticatietype (alleen <em>Reader</em> nodig, geen diagnostic settings):
+            <ul>
+                <li><strong>SAS in gebruik:</strong> er zijn requests met een account/service SAS of een user delegation SAS.</li>
+                <li><strong>Alleen account key:</strong> geen SAS, wel requests met de account key (connection strings).</li>
+                <li><strong>Geen key- of SAS-gebruik:</strong> shared key staat aan maar niets gebruikt het. Die kan je uitzetten.</li>
+            </ul>
+            Account en service SAS zijn ondertekend met de account key: ze werken zolang <code>allowSharedKeyAccess</code> aan staat.
+            Accounts waar dat uit staat, verschijnen alleen als er user delegation SAS gebruikt wordt.
+            <p>
+                De metrics tonen hoeveel, niet wie. Voor de afzender (IP, user agent, welke container) heb je diagnostic settings naar Log Analytics nodig:
+            </p>
+            <CopyCommand Command="@LogQuery" />
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    private const string LogQuery =
+        "StorageBlobLogs | where TimeGenerated > ago(30d) and AuthenticationType in ('SAS', 'DelegationSas') " +
+        "| summarize Requests = count(), LastSeen = max(TimeGenerated) by AccountName, AuthenticationType, CallerIpAddress, UserAgentHeader";
+
+    private int _days = 30;
+    private int _ranDays = 30;
+
+    private Dictionary<string, Acknowledgement> _acks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _ackBusy = new(StringComparer.OrdinalIgnoreCase);
+    private enum AckView { Open, Accepted, All }
+    private AckView _ackView = AckView.Open;
+    private string? _ackEditId;
+    private string _ackReason = "";
+    private string? _ackError;
+
+    // ---- Bulk acknowledge: one reason for all selected (visible, not yet accepted) storage accounts.
+    private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
+    private string _bulkReason = "";
+    private bool _bulkRunning;
+    private string? _bulkStatus;
+
+    private List<StorageSasUsage> SelectableVisible => Filtered.Where(u => !_acks.ContainsKey(u.Resource.Id)).ToList();
+
+    private List<StorageSasUsage> SelectedVisible => SelectableVisible.Where(u => _selected.Contains(u.Resource.Id)).ToList();
+
+    private int AcknowledgedCount => Result?.Items.Count(u => _acks.ContainsKey(u.Resource.Id)) ?? 0;
+
+    private void Toggle(string id, ChangeEventArgs e)
+    {
+        if (e.Value is true) _selected.Add(id); else _selected.Remove(id);
+    }
+
+    private void ToggleAll(ChangeEventArgs e)
+    {
+        var ids = SelectableVisible.Select(u => u.Resource.Id);
+        if (e.Value is true) _selected.UnionWith(ids); else _selected.ExceptWith(ids);
+    }
+
+    private async Task RunReportAsync()
+    {
+        _selected.Clear();
+        _bulkReason = "";
+        await RunAsync();
+    }
+
+    protected override async Task<ReportResult<StorageSasUsage>> ExecuteAsync(IProgress<string> progress, CancellationToken ct)
+    {
+        _ranDays = _days;
+        _ackError = null;
+        var report = Report.RunAsync(_days, progress, ct);
+        if (Acknowledgements.IsEnabled)
+        {
+            try
+            {
+                _acks = await Acknowledgements.GetAsync(AcknowledgementReports.StorageSas, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _acks = new(StringComparer.OrdinalIgnoreCase);
+                _ackError = $"Aanvaarde storage accounts konden niet geladen worden, dus alles wordt getoond: {ex.Message}";
+            }
+        }
+        return await report;
+    }
+
+    // Default view hides accepted accounts; the "Aanvaard" dropdown switches to only accepted or all.
+    protected override bool ExtraFilter(StorageSasUsage u) => _ackView switch
+    {
+        AckView.Open => !_acks.ContainsKey(u.Resource.Id),
+        AckView.Accepted => _acks.ContainsKey(u.Resource.Id),
+        _ => true,
+    };
+
+    private void StartAcknowledge(string id)
+    {
+        _ackEditId = id;
+        _ackReason = "";
+    }
+
+    private async Task AcknowledgeAsync(StorageSasUsage u)
+    {
+        var id = u.Resource.Id;
+        _ackEditId = null;
+        _ackError = null;
+        _ackBusy.Add(id);
+        try
+        {
+            _acks[id] = await Acknowledgements.AcknowledgeAsync(AcknowledgementReports.StorageSas, id, u.Resource.Name, u.StateLabel, _ackReason);
+        }
+        catch (Exception ex)
+        {
+            _ackError = $"Aanvaarden van {u.Resource.Name} mislukt: {ex.Message}";
+        }
+        finally
+        {
+            _ackBusy.Remove(id);
+        }
+    }
+
+    private async Task AcknowledgeSelectedAsync()
+    {
+        var items = SelectedVisible;
+        var reason = _bulkReason;
+        _ackError = null;
+        _bulkRunning = true;
+        var failed = new List<string>();
+        try
+        {
+            for (var n = 0; n < items.Count; n++)
+            {
+                var u = items[n];
+                var id = u.Resource.Id;
+                _bulkStatus = $"Aanvaarden {n + 1}/{items.Count}…";
+                _ackBusy.Add(id);
+                StateHasChanged();
+                try
+                {
+                    _acks[id] = await Acknowledgements.AcknowledgeAsync(AcknowledgementReports.StorageSas, id, u.Resource.Name, u.StateLabel, reason);
+                    _selected.Remove(id);
+                }
+                catch (Exception ex)
+                {
+                    failed.Add($"{u.Resource.Name}: {ex.Message}");
+                }
+                finally
+                {
+                    _ackBusy.Remove(id);
+                }
+            }
+        }
+        finally
+        {
+            _bulkRunning = false;
+            _bulkStatus = null;
+        }
+        if (failed.Count > 0)
+            _ackError = $"{failed.Count} van {items.Count} niet aanvaard (blijven geselecteerd): {string.Join(" · ", failed.Take(3))}{(failed.Count > 3 ? " …" : "")}";
+        else
+            _bulkReason = "";
+    }
+
+    private async Task RevokeAsync(StorageSasUsage u)
+    {
+        var id = u.Resource.Id;
+        _ackError = null;
+        _ackBusy.Add(id);
+        try
+        {
+            await Acknowledgements.RevokeAsync(AcknowledgementReports.StorageSas, id, u.Resource.Name);
+            _acks.Remove(id);
+        }
+        catch (Exception ex)
+        {
+            _ackError = $"Intrekken voor {u.Resource.Name} mislukt: {ex.Message}";
+        }
+        finally
+        {
+            _ackBusy.Remove(id);
+        }
+    }
+
+    /// <summary>Short link text: host + path without the scheme, e.g. github.com/org/repo.</summary>
+    private static string SourceLabel(Uri uri) => (uri.Host + uri.AbsolutePath).TrimEnd('/');
+
+    protected override Func<StorageSasUsage, string?> RegionSelector => u => u.Resource.Location;
+    protected override Func<StorageSasUsage, (string? Key, string? Label)> SubscriptionSelector =>
+        u => (u.Resource.SubscriptionId, u.Resource.SubscriptionName);
+
+    protected override Func<StorageSasUsage, string?> TypeSelector => u => u.StateLabel;
+
+    private static string BadgeClass(SasUsageState state) => state switch
+    {
+        SasUsageState.SasUsed => "err",
+        SasUsageState.KeyOnly => "warn",
+        SasUsageState.NotUsed => "ok",
+        _ => "",
+    };
+
+    protected override IComparable? SortValue(StorageSasUsage u, string key) => key switch
+    {
+        "state" => (int)u.State,
+        "resource" => u.Resource.Name.ToLowerInvariant(),
+        "subscription" => u.Resource.SubscriptionName.ToLowerInvariant(),
+        "source" => u.SourceCode?.ToLowerInvariant(),
+        "sas" => u.State == SasUsageState.Unknown ? null : u.TotalSasRequests,
+        "key" => u.State == SasUsageState.Unknown ? null : u.AccountKeyRequests,
+        "oauth" => u.State == SasUsageState.Unknown ? null : u.OAuthRequests,
+        "last" => u.LastSasUse,
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(StorageSasUsage u) =>
+        [u.Resource.Name, u.Resource.ResourceGroup, u.Resource.SubscriptionName, u.StateLabel, u.Kind, u.Sku, u.SourceCode];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Status", "StorageAccount", "ResourceGroup", "Subscription", "Location", "Days", "SasRequests", "UserDelegationSasRequests", "AccountKeyRequests",
+                "EntraIdRequests", "AnonymousRequests", "LastSasUse", "SharedKeyAllowed", "SasExpirationPeriod", "Kind", "Sku", "SourceCode", "ResourceId", "AzCliDisableSharedKey",
+                "AcknowledgedBy", "AcknowledgedAt", "AcknowledgeReason"],
+            Filtered.Select(u => new[]
+            {
+                u.StateLabel, u.Resource.Name, u.Resource.ResourceGroup, u.Resource.SubscriptionName, u.Resource.Location, _ranDays.ToString(),
+                u.SasRequests.ToString(), u.DelegationSasRequests.ToString(), u.AccountKeyRequests.ToString(), u.OAuthRequests.ToString(),
+                u.AnonymousRequests.ToString(), u.LastSasUse?.ToString("yyyy-MM-dd"), u.SharedKeyAllowed ? "ja" : "nee", u.SasExpirationPeriod,
+                u.Kind, u.Sku, u.SourceCode, u.Resource.Id, u.AzCliDisableSharedKey,
+                _acks.GetValueOrDefault(u.Resource.Id)?.AcknowledgedBy, _acks.GetValueOrDefault(u.Resource.Id)?.AcknowledgedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"),
+                _acks.GetValueOrDefault(u.Resource.Id)?.Reason,
+            }));
+        await DownloadCsvAsync($"storage-sas-gebruik-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

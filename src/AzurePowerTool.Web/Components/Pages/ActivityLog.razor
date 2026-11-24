@@ -1,0 +1,134 @@
+@page "/activity-log"
+@inherits ReportPageBase<AuditEntry>
+@inject AuditLog Audit
+
+<PageTitle>Activiteitenlog · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Activiteitenlog</h1>
+        <p class="lead">Alles wat vanuit de tool gewijzigd of opgekuist werd: verwijderingen en aanvaardingen. Opvragen van info wordt niet gelogd.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    @if (!Audit.IsEnabled)
+    {
+        <div class="alert warning">Er is geen logbestand gekoppeld. Kies of maak er een links onderaan (<em>Logbestand</em>). Zonder logging zijn wijzigingen vanuit de tool uitgeschakeld.</div>
+    }
+    else
+    {
+        <ReportToolbar Running="Running" Status="@Status" HasResult="Result is not null" OnRun="RunAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+        @if (Result is not null && !Running)
+        {
+            <div class="filters">
+                <FilterChecks Label="Actie" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+                <label class="filter-select grow">
+                    <span class="label">Zoeken</span>
+                    <input class="input" placeholder="Gebruiker, resource, details…" @bind="Filter" @bind:event="oninput" />
+                </label>
+                @if (HasActiveFilters)
+                {
+                    <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+                }
+            </div>
+        }
+
+        <ErrorBox Error="Error" />
+
+        @if (Result is not null)
+        {
+            <p class="summary">
+                <strong>@Filtered.Count</strong> actie(s) in de laatste @Months maanden
+                @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            </p>
+
+            @if (Filtered.Count > 0)
+            {
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="sortable" @onclick='() => SortBy("time")'>Tijdstip@(SortIndicator("time"))</th>
+                                <th class="sortable" @onclick='() => SortBy("user")'>Gebruiker@(SortIndicator("user"))</th>
+                                <th class="sortable" @onclick='() => SortBy("action")'>Actie@(SortIndicator("action"))</th>
+                                <th>Doel</th>
+                                <th class="sortable" @onclick='() => SortBy("result")'>Resultaat@(SortIndicator("result"))</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var e in Filtered)
+                            {
+                                <tr>
+                                    <td class="nowrap small">@e.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
+                                    <td>@e.User</td>
+                                    <td><span class="badge">@ActionLabel(e.Action)</span></td>
+                                    <td>
+                                        @if (e.TargetName is not null) { <strong>@e.TargetName</strong> }
+                                        <div class="mono small muted" style="word-break:break-all">@e.TargetId</div>
+                                    </td>
+                                    <td>
+                                        @if (e.Success) { <span class="badge ok">Gelukt</span> }
+                                        else { <span class="badge err">Mislukt</span> <div class="small error-text">@e.Error</div> }
+                                    </td>
+                                    <td class="small">@e.Details</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+        else if (!Running)
+        {
+            <div class="card muted">Klik op <strong>Rapport uitvoeren</strong> om de acties van de laatste @Months maanden op te halen.</div>
+        }
+    }
+</SignInRequired>
+
+@code {
+    private const int Months = 3;
+
+    protected override async Task<ReportResult<AuditEntry>> ExecuteAsync(IProgress<string> progress, CancellationToken ct)
+    {
+        progress.Report("Activiteitenlog ophalen…");
+        var entries = await Audit.ListAsync(Months, ct: ct);
+        return new ReportResult<AuditEntry>(entries, [], DateTimeOffset.Now);
+    }
+
+    private static string ActionLabel(string action) => action switch
+    {
+        AuditActions.RoleAssignmentDelete => "Role assignment verwijderd",
+        AuditActions.ResourceGroupDelete => "Resourcegroep verwijderd",
+        AuditActions.Acknowledge => "Aanvaard",
+        AuditActions.AcknowledgeRevoke => "Aanvaarding ingetrokken",
+        _ => action,
+    };
+
+    protected override Func<AuditEntry, string?> TypeSelector => e => ActionLabel(e.Action);
+
+    protected override IComparable? SortValue(AuditEntry e, string key) => key switch
+    {
+        "time" => e.Time,
+        "user" => e.User.ToLowerInvariant(),
+        "action" => e.Action,
+        "result" => e.Success,
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(AuditEntry e) => [e.User, e.Action, e.TargetId, e.TargetName, e.Details, e.Error];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Time", "User", "TenantId", "Action", "TargetName", "TargetId", "Success", "Details", "Error"],
+            Filtered.Select(e => new[]
+            {
+                e.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), e.User, e.TenantId, e.Action, e.TargetName, e.TargetId,
+                e.Success ? "true" : "false", e.Details, e.Error,
+            }));
+        await DownloadCsvAsync($"activiteitenlog-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

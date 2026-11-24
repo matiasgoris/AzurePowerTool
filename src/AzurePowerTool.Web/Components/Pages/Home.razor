@@ -1,0 +1,224 @@
+@page "/"
+@inherits SessionAwareComponent
+@inject AccessOverviewReport OverviewReport
+@inject BrowserSession BrowserSession
+
+<PageTitle>Mijn toegang · Azure PowerTool</PageTitle>
+
+@if (!Session.IsSignedIn)
+{
+    <section class="card signin">
+        <h1>Aanmelden</h1>
+        <p>
+            Meld je aan met je Microsoft-account. Je gaat even naar de aanmeldpagina van Microsoft;
+            daarna kom je hier terug en zie je meteen wat je met je account in Azure kan zien.
+        </p>
+
+        <label class="label" for="tenant-input">Tenant (optioneel)</label>
+        <input id="tenant-input" class="input" placeholder="contoso.onmicrosoft.com of tenant-id" @bind="_tenantInput" disabled="@_signingIn" />
+        <div class="muted small">Leeg laten = je eigen (home) tenant. Je kan later nog wisselen.</div>
+
+        <div class="toolbar">
+            <button class="btn primary" @onclick="SignInAsync" disabled="@_signingIn">
+                @(_signingIn ? "Doorsturen naar Microsoft…" : "Aanmelden met Microsoft")
+            </button>
+        </div>
+
+        @if (BrowserSession.ConfigurationError is { } configError)
+        {
+            <div class="alert error">@configError</div>
+        }
+        <ErrorBox Error="_error" />
+
+        <p class="muted small">
+            Alles draait in je browser: de tool praat rechtstreeks met Azure en Microsoft Graph, met jouw eigen
+            rechten. Er is geen server; je tokens blijven in deze browser.
+        </p>
+    </section>
+}
+else
+{
+    <header class="page-header">
+        <div>
+            <h1>Mijn toegang</h1>
+            <p class="lead">Wat kan je met je huidige credentials zien in deze tenant?</p>
+        </div>
+        <button class="btn" @onclick="LoadOverviewAsync" disabled="@_loading">@(_loading ? "Laden…" : "Vernieuwen")</button>
+    </header>
+
+    <ErrorBox Error="_error" />
+
+    @if (_loading && _overview is null)
+    {
+        <div class="card muted">Overzicht ophalen…</div>
+    }
+    else if (_overview is { } o)
+    {
+        <div class="grid">
+            <section class="card">
+                <h2>Account</h2>
+                <dl class="facts">
+                    <dt>Naam</dt><dd>@(o.User?.DisplayName ?? "–")</dd>
+                    <dt>UPN</dt><dd>@o.Username</dd>
+                    <dt>Type</dt><dd>@(o.User?.UserType ?? "–")</dd>
+                    <dt>Tenant</dt><dd>@(o.Tenants.FirstOrDefault(t => t.TenantId == o.TenantId)?.Label ?? o.TenantId)</dd>
+                    <dt>Tenants</dt><dd>@o.Tenants.Count beschikbaar</dd>
+                    <dt>Groepen</dt><dd>@o.GroupCount (incl. genest)</dd>
+                </dl>
+            </section>
+
+            <section class="card">
+                <h2>Wat werkt er met jouw rechten?</h2>
+                <ul class="checks">
+                    @foreach (var check in o.Checks)
+                    {
+                        <li class="check @check.Status.ToString().ToLowerInvariant()">
+                            <span class="check-icon" aria-hidden="true">@Icon(check.Status)</span>
+                            <div>
+                                <div><strong>@check.Name</strong>@if (check.NeededFor is not null){<span class="muted small"> · nodig voor: @check.NeededFor</span>}</div>
+                                <div class="small">@check.Detail</div>
+                            </div>
+                        </li>
+                    }
+                </ul>
+            </section>
+        </div>
+
+        <section class="card">
+            <h2>Entra ID-rollen <span class="count">@o.EntraRoles.Count</span></h2>
+            @if (o.EntraRoles.Count == 0)
+            {
+                <p class="muted">Geen actieve Entra ID-rollen (PIM-rollen die niet geactiveerd zijn, worden niet getoond).</p>
+            }
+            else
+            {
+                <div class="chips">@foreach (var role in o.EntraRoles){<span class="chip">@role</span>}</div>
+            }
+        </section>
+
+        <section class="card">
+            <h2>Azure RBAC-rollen <span class="count">@o.RoleAssignments.Count</span></h2>
+            <p class="muted small">Jouw role assignments, direct of via een groep, inclusief die op management group-niveau.</p>
+            @if (o.RoleAssignments.Count > 0)
+            {
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Rol</th><th>Niveau</th><th>Scope</th><th>Subscription</th><th>Via</th></tr></thead>
+                        <tbody>
+                            @foreach (var r in o.RoleAssignments)
+                            {
+                                <tr>
+                                    <td><strong>@r.Assignment.RoleName</strong></td>
+                                    <td><span class="badge">@r.Assignment.ScopeLevel</span></td>
+                                    <td class="mono" title="@r.Assignment.Scope">@r.Assignment.ScopeName</td>
+                                    <td>@(r.Assignment.SubscriptionName ?? "–")</td>
+                                    <td>@r.Via</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="card">
+            <h2>Subscriptions <span class="count">@o.Subscriptions.Count</span></h2>
+            @if (o.Subscriptions.Count > 0)
+            {
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Naam</th><th>Subscription id</th><th>Status</th></tr></thead>
+                        <tbody>
+                            @foreach (var s in o.Subscriptions)
+                            {
+                                <tr>
+                                    <td><a href="@Portal.ResourceUrl(o.TenantId, $"/subscriptions/{s.SubscriptionId}")" target="_blank" rel="noopener">@s.DisplayName</a></td>
+                                    <td class="mono">@s.SubscriptionId</td>
+                                    <td><span class="badge @(s.State == "Enabled" ? "ok" : "warn")">@s.State</span></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <details class="card">
+            <summary>Microsoft Graph-permissies in je token (@o.GraphScopes.Count)</summary>
+            <div class="chips">@foreach (var scope in o.GraphScopes){<span class="chip mono">@scope</span>}</div>
+        </details>
+
+        <p class="muted small">Gegenereerd om @o.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</p>
+    }
+}
+
+@code {
+    private string? _tenantInput;
+    private bool _signingIn;
+    private CancellationTokenSource? _signInCts;
+    private bool _loading;
+    private Exception? _error;
+    private AccessOverview? _overview;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Session.IsSignedIn) await LoadOverviewAsync();
+    }
+
+    protected override async Task OnSessionChangedAsync()
+    {
+        _overview = null;
+        _error = null;
+        if (Session.IsSignedIn) await LoadOverviewAsync();
+    }
+
+    private async Task SignInAsync()
+    {
+        _signInCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        _signingIn = true;
+        _error = null;
+        try
+        {
+            await Session.SignInAsync(_tenantInput, _signInCts.Token); // Changed → overview loads
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled by the user or timed out.
+        }
+        catch (Exception ex)
+        {
+            _error = ex;
+        }
+        finally
+        {
+            _signingIn = false;
+        }
+    }
+
+    private async Task LoadOverviewAsync()
+    {
+        if (_loading) return;
+        _loading = true;
+        _error = null;
+        StateHasChanged();
+        try
+        {
+            _overview = await OverviewReport.RunAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static string Icon(CheckStatus status) => status switch
+    {
+        CheckStatus.Ok => "✓",
+        CheckStatus.Warning => "!",
+        _ => "✕",
+    };
+}

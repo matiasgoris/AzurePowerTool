@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Local builds are "dev". The GitHub Pages workflow sets 1.0.<run number>. -->
+    <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
+    <Product>Azure PowerTool</Product>
+  </PropertyGroup>
+</Project>

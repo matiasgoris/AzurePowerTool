@@ -1,0 +1,97 @@
+@* Multi-select dropdown. Selected empty = everything shown (all boxes checked). *@
+<div class="filter-select">
+    <span class="label">@Label</span>
+    <details class="dropdown">
+        <summary class="input @(Selected.Count > 0 ? "active" : "")">@Summary</summary>
+        <div class="dropdown-panel">
+            @if (Options.Count > 8)
+            {
+                <input class="input" placeholder="Zoeken…" @bind="_search" @bind:event="oninput" />
+            }
+            <div class="dropdown-actions">
+                <button type="button" class="btn link" @onclick="SelectAllAsync">Alles</button>
+                <button type="button" class="btn link" @onclick="SelectNoneAsync">Niets</button>
+            </div>
+            <div class="dropdown-list">
+                @foreach (var option in Visible)
+                {
+                    <label class="dropdown-option">
+                        <input type="checkbox" checked="@IsChecked(option.Value)" @onchange="() => ToggleAsync(option.Value)" />
+                        <span class="grow">@option.Label</span>
+                        <span class="muted small">@option.Count</span>
+                    </label>
+                }
+                @if (!Visible.Any())
+                {
+                    <div class="muted small">Geen resultaten.</div>
+                }
+            </div>
+        </div>
+    </details>
+</div>
+
+@code {
+    // Kept in the set when the user unchecks everything, so "nothing selected" doesn't fall back to "all".
+    private const string Nothing = "__nothing__";
+
+    private string _search = "";
+
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter, EditorRequired] public IReadOnlyList<FilterOption> Options { get; set; } = [];
+
+    /// <summary>Selected option values; mutated in place. Empty = all.</summary>
+    [Parameter, EditorRequired] public HashSet<string> Selected { get; set; } = [];
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private IEnumerable<FilterOption> Visible => _search.Trim() is { Length: > 0 } q
+        ? Options.Where(o => o.Label.Contains(q, StringComparison.OrdinalIgnoreCase))
+        : Options;
+
+    private bool IsChecked(string value) => Selected.Count == 0 || Selected.Contains(value);
+
+    private string Summary
+    {
+        get
+        {
+            if (Selected.Count == 0) return $"Alle ({Options.Count})";
+            var chosen = Options.Where(o => Selected.Contains(o.Value)).ToList();
+            return chosen.Count switch
+            {
+                0 => "Niets geselecteerd",
+                1 => chosen[0].Label,
+                _ => $"{chosen.Count} van {Options.Count} geselecteerd",
+            };
+        }
+    }
+
+    private Task ToggleAsync(string value)
+    {
+        if (Selected.Count == 0)
+        {
+            // Everything was shown: unchecking one means "all except this one".
+            Selected.UnionWith(Options.Select(o => o.Value));
+        }
+        Selected.Remove(Nothing);
+
+        if (!Selected.Remove(value)) Selected.Add(value);
+
+        if (Options.All(o => Selected.Contains(o.Value))) Selected.Clear();
+        else if (Selected.Count == 0) Selected.Add(Nothing);
+
+        return OnChanged.InvokeAsync();
+    }
+
+    private Task SelectAllAsync()
+    {
+        Selected.Clear();
+        return OnChanged.InvokeAsync();
+    }
+
+    private Task SelectNoneAsync()
+    {
+        Selected.Clear();
+        Selected.Add(Nothing);
+        return OnChanged.InvokeAsync();
+    }
+}

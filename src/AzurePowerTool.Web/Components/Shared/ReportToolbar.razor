@@ -1,0 +1,24 @@
+<div class="toolbar">
+    <button class="btn primary" @onclick="OnRun" disabled="@Running">@(Running ? "Bezig…" : HasResult ? "Opnieuw uitvoeren" : "Rapport uitvoeren")</button>
+    @if (Running)
+    {
+        <button class="btn" @onclick="OnCancel">Annuleren</button>
+    }
+    @if (Status is not null)
+    {
+        <span class="muted">@Status</span>
+    }
+    @if (HasResult && !Running)
+    {
+        <button class="btn push-right" @onclick="OnExport">Export CSV</button>
+    }
+</div>
+
+@code {
+    [Parameter] public bool Running { get; set; }
+    [Parameter] public string? Status { get; set; }
+    [Parameter] public bool HasResult { get; set; }
+    [Parameter] public EventCallback OnRun { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+    [Parameter] public EventCallback OnExport { get; set; }
+}

@@ -1,0 +1,137 @@
+@page "/open-ports"
+@inherits ReportPageBase<OpenPortRule>
+@inject OpenNsgPortsReport Report
+
+<PageTitle>Open poorten naar internet · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Open poorten naar internet</h1>
+        <p class="lead">Inbound NSG-regels die beheer- of databasepoorten (of alle poorten) openzetten voor het hele internet.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <ReportToolbar Running="Running" Status="@Status" HasResult="Result is not null" OnRun="RunAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterMulti Label="Regio's" Options="RegionOptions" Selected="SelectedRegions" OnChanged="StateHasChanged" />
+            <SeverityFilter @bind-Value="MinSeverity" />
+            <FilterChecks Label="NSG" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="NSG, regel, poort, dienst…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        <p class="summary">
+            <strong>@Filtered.Count</strong> open regel(s)
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="sortable" @onclick='() => SortBy("severity")'>Ernst@(SortIndicator("severity"))</th>
+                            <th class="sortable" @onclick='() => SortBy("services")'>Blootgesteld@(SortIndicator("services"))</th>
+                            <th class="sortable" @onclick='() => SortBy("nsg")'>NSG / regel@(SortIndicator("nsg"))</th>
+                            <th class="sortable" @onclick='() => SortBy("source")'>Bron@(SortIndicator("source"))</th>
+                            <th class="sortable" @onclick='() => SortBy("attached")'>Gekoppeld aan@(SortIndicator("attached"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th>Afschermen</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var rule in Filtered)
+                        {
+                            <tr>
+                                <td><SeverityBadge Value="rule.Severity" /></td>
+                                <td>
+                                    <strong>@string.Join(", ", rule.ExposedServices)</strong>
+                                    <div class="muted small">@rule.Protocol · poort @string.Join(", ", rule.Ports.DefaultIfEmpty("*"))</div>
+                                </td>
+                                <td>
+                                    <a href="@Portal.ResourceUrl(Session.Account!.TenantId, rule.Nsg.Id)" target="_blank" rel="noopener"><strong>@rule.Nsg.Name</strong></a>
+                                    <div class="muted small">@rule.RuleName · prioriteit @rule.Priority</div>
+                                </td>
+                                <td class="mono small">@string.Join(", ", rule.Sources)</td>
+                                <td>
+                                    @if (rule.IsAttached) { @rule.AttachedLabel }
+                                    else { <span class="badge">niet gekoppeld</span> }
+                                </td>
+                                <td>@rule.Nsg.SubscriptionName<div class="muted small">@rule.Nsg.ResourceGroup</div></td>
+                                <td><CopyCommand Command="@rule.AzCliRestrict" /></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Gecontroleerd worden inbound <em>Allow</em>-regels met als bron <span class="mono">*</span>,
+            <span class="mono">Internet</span> of <span class="mono">0.0.0.0/0</span> op onder meer SSH, RDP, SMB, WinRM en databasepoorten.
+            Webpoorten (80/443) worden niet gemeld. Het commando beperkt de bron tot een IP-range die je zelf invult. Voor beheertoegang zijn
+            Azure Bastion of Just-in-time VM access betere alternatieven. De CSV bevat ook het commando om de regel te verwijderen.
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    protected override Task<ReportResult<OpenPortRule>> ExecuteAsync(IProgress<string> progress, CancellationToken ct) =>
+        Report.RunAsync(progress, ct);
+
+    protected override Func<OpenPortRule, string?> RegionSelector => r => r.Nsg.Location;
+    protected override Func<OpenPortRule, (string? Key, string? Label)> SubscriptionSelector =>
+        r => (r.Nsg.SubscriptionId, r.Nsg.SubscriptionName);
+
+    protected override Func<OpenPortRule, Severity> SeveritySelector => r => r.Severity;
+
+    protected override Func<OpenPortRule, string?> TypeSelector => r => r.IsAttached ? "Gekoppeld" : "Niet gekoppeld";
+
+    protected override IComparable? SortValue(OpenPortRule r, string key) => key switch
+    {
+        "severity" => (int)r.Severity,
+        "services" => string.Join(",", r.ExposedServices),
+        "nsg" => $"{r.Nsg.Name}/{r.RuleName}".ToLowerInvariant(),
+        "source" => string.Join(",", r.Sources),
+        "attached" => r.AttachedSubnets + r.AttachedNics,
+        "subscription" => r.Nsg.SubscriptionName.ToLowerInvariant(),
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(OpenPortRule r) =>
+        [r.Nsg.Name, r.RuleName, r.Nsg.ResourceGroup, r.Nsg.SubscriptionName, r.Protocol, .. r.Ports, .. r.Sources, .. r.ExposedServices];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Severity", "Exposed", "Protocol", "Ports", "Sources", "Nsg", "Rule", "Priority", "AttachedTo", "ResourceGroup", "Subscription", "RuleId", "AzCliRestrict", "AzCliDelete"],
+            Filtered.Select(r => new[]
+            {
+                r.Severity.Label(), string.Join(", ", r.ExposedServices), r.Protocol, string.Join(", ", r.Ports), string.Join(", ", r.Sources),
+                r.Nsg.Name, r.RuleName, r.Priority.ToString(), r.AttachedLabel, r.Nsg.ResourceGroup, r.Nsg.SubscriptionName,
+                r.RuleId, r.AzCliRestrict, r.AzCliDelete,
+            }));
+        await DownloadCsvAsync($"open-poorten-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

@@ -1,0 +1,17 @@
+@inherits SessionAwareComponent
+
+@if (Session.IsSignedIn)
+{
+    @ChildContent
+}
+else
+{
+    <div class="card">
+        <p>Je bent niet aangemeld.</p>
+        <a class="btn primary" href="">Naar aanmelden</a>
+    </div>
+}
+
+@code {
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

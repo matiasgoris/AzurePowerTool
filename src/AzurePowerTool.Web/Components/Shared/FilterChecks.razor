@@ -1,0 +1,28 @@
+<div class="filter-select">
+    <span class="label">@Label</span>
+    <div class="check-group">
+        @foreach (var option in Options)
+        {
+            <label class="check-option @(Excluded.Contains(option.Value) ? "off" : "")">
+                <input type="checkbox" checked="@(!Excluded.Contains(option.Value))" @onchange="() => ToggleAsync(option.Value)" />
+                @option.Label <span class="muted">(@option.Count)</span>
+            </label>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter, EditorRequired] public IReadOnlyList<FilterOption> Options { get; set; } = [];
+
+    /// <summary>Unchecked option values; mutated in place.</summary>
+    [Parameter, EditorRequired] public HashSet<string> Excluded { get; set; } = [];
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private Task ToggleAsync(string value)
+    {
+        if (!Excluded.Remove(value)) Excluded.Add(value);
+        return OnChanged.InvokeAsync();
+    }
+}

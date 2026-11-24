@@ -1,0 +1,173 @@
+@page "/public-storage"
+@inherits ReportPageBase<PublicStorageAccount>
+@inject PublicStorageReport Report
+
+<PageTitle>Publieke storage accounts · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Publieke storage accounts</h1>
+        <p class="lead">Storage accounts met publieke netwerktoegang, zonder network security perimeter in Enforced-modus, zonder uitzonderingstag en zonder private endpoint.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <ReportToolbar Running="Running" Status="@Status" HasResult="Result is not null" OnRun="RunAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterMulti Label="Regio's" Options="RegionOptions" Selected="SelectedRegions" OnChanged="StateHasChanged" />
+            <SeverityFilter @bind-Value="MinSeverity" />
+            @if (Result.Items.Any(a => a.Nsp is not null))
+            {
+                <label class="filter-select" title="Verberg accounts die al in een NSP zitten die nog niet op Enforced staat">
+                    <span class="label">NSP</span>
+                    <select class="input @(_allowLearning ? "active" : "")" @bind="_allowLearning">
+                        <option value="false">Alleen Enforced telt</option>
+                        <option value="true">Learning ook toestaan</option>
+                    </select>
+                </label>
+            }
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Naam, resourcegroep, tag…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        <p class="summary">
+            <strong>@Filtered.Count</strong> storage account(s)
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="sortable" @onclick='() => SortBy("severity")'>Ernst@(SortIndicator("severity"))</th>
+                            <th class="sortable" @onclick='() => SortBy("resource")'>Storage account@(SortIndicator("resource"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th class="sortable" @onclick='() => SortBy("exposure")'>Bereikbaar vanuit@(SortIndicator("exposure"))</th>
+                            <th>Fix</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var a in Filtered)
+                        {
+                            <tr>
+                                <td><SeverityBadge Value="a.Severity" /></td>
+                                <td>
+                                    <a href="@Portal.ResourceUrl(Session.Account!.TenantId, a.Resource.Id)" target="_blank" rel="noopener">@a.Resource.Name</a>
+                                    <div class="muted small">@a.Resource.ResourceGroup · @a.Resource.Location</div>
+                                    @if (a.Nsp is { } nsp)
+                                    {
+                                        <span class="badge warn" title="Network security perimeter, nog niet op Enforced">NSP @nsp.Label</span>
+                                    }
+                                </td>
+                                <td>@a.Resource.SubscriptionName</td>
+                                <td>
+                                    <strong>@a.ExposureLabel</strong>
+                                    <div class="muted small">@a.RulesLabel</div>
+                                    @if (a.AnonymousBlobAccess)
+                                    {
+                                        <span class="badge err" title="allowBlobPublicAccess staat aan: containers kunnen anoniem leesbaar gemaakt worden">Anonieme blob-toegang toegestaan</span>
+                                    }
+                                    @if (a.UnapprovedPrivateEndpoints > 0)
+                                    {
+                                        <span class="badge warn" title="Private endpoint-verbindingen die niet goedgekeurd zijn tellen niet mee">@a.UnapprovedPrivateEndpoints private endpoint(s) niet goedgekeurd</span>
+                                    }
+                                </td>
+                                <td class="small">
+                                    @if (a.AzCliEnforceNsp is { } enforce)
+                                    {
+                                        <div class="muted">⚠ NSP op Enforced zetten: verkeer buiten de perimeter zonder access rule wordt dan geblokkeerd. Controleer eerst de NSP-logs.</div>
+                                        <CopyCommand Command="@enforce" />
+                                        <div class="muted">Of:</div>
+                                    }
+                                    <div class="muted">⚠ Publieke toegang uitzetten: zet eerst een private endpoint of NSP op, anders verliezen applicaties de toegang.</div>
+                                    <CopyCommand Command="@a.AzCliDisablePublic" />
+                                    <div class="muted">Of markeer als bewuste uitzondering:</div>
+                                    <CopyCommand Command="@a.AzCliExclude" />
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Een storage account wordt gemeld als alle vier kloppen:
+            <ul>
+                <li><strong>Publieke netwerktoegang staat aan</strong> (<code>publicNetworkAccess</code> is niet <em>Disabled</em> of <em>SecuredByPerimeter</em>).</li>
+                <li><strong>Geen NSP op Enforced:</strong> het account zit in geen enkele network security perimeter in <em>Enforced</em>-modus. Een koppeling in <em>Learning</em> logt alleen en telt dus niet; die accounts krijgen een NSP-badge en je kan ze met het NSP-filter verbergen.</li>
+                <li><strong>Geen uitzonderingstag:</strong> de tag <code>@PublicStorageReport.ExcludeTagName</code> = <code>@PublicStorageReport.ExcludeTagValue</code> ontbreekt.</li>
+                <li><strong>Geen private endpoint:</strong> er is geen goedgekeurde private endpoint-verbinding.</li>
+            </ul>
+            De ernst volgt uit de firewall: <em>Hoog</em> = bereikbaar vanuit alle netwerken, <em>Middel</em> = geselecteerde IP-ranges of VNets,
+            <em>Laag</em> = firewall dicht zonder regels (alleen trusted services).
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    protected override Task<ReportResult<PublicStorageAccount>> ExecuteAsync(IProgress<string> progress, CancellationToken ct) =>
+        Report.RunAsync(progress, ct);
+
+    protected override Func<PublicStorageAccount, string?> RegionSelector => a => a.Resource.Location;
+    protected override Func<PublicStorageAccount, (string? Key, string? Label)> SubscriptionSelector =>
+        a => (a.Resource.SubscriptionId, a.Resource.SubscriptionName);
+
+    protected override Func<PublicStorageAccount, Severity> SeveritySelector => a => a.Severity;
+
+    /// <summary>Off (default): only an Enforced perimeter exempts an account. On: hide accounts in a Learning perimeter too.</summary>
+    private bool _allowLearning;
+
+    protected override bool ExtraFilter(PublicStorageAccount a) => !_allowLearning || a.Nsp is null;
+    protected override bool HasExtraFilters => _allowLearning;
+    protected override void ClearExtraFilters() => _allowLearning = false;
+
+    protected override IComparable? SortValue(PublicStorageAccount a, string key) => key switch
+    {
+        "severity" => (int)a.Severity,
+        "resource" => a.Resource.Name.ToLowerInvariant(),
+        "subscription" => a.Resource.SubscriptionName.ToLowerInvariant(),
+        "exposure" => (int)a.Exposure,
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(PublicStorageAccount a) =>
+        [a.Resource.Name, a.Resource.ResourceGroup, a.Resource.SubscriptionName, a.ExposureLabel, a.Kind, a.Sku, a.Nsp?.Label,
+            .. a.Tags.Select(t => $"{t.Key}={t.Value}")];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Severity", "StorageAccount", "ResourceGroup", "Subscription", "Location", "Exposure", "IpRules", "VnetRules", "AnonymousBlobAccess",
+                "UnapprovedPrivateEndpoints", "Nsp", "NspAccessMode", "Kind", "Sku", "Tags", "ResourceId", "AzCliEnforceNsp", "AzCliDisablePublic", "AzCliExclude"],
+            Filtered.Select(a => new[]
+            {
+                a.Severity.Label(), a.Resource.Name, a.Resource.ResourceGroup, a.Resource.SubscriptionName, a.Resource.Location, a.ExposureLabel,
+                a.IpRules.ToString(), a.VnetRules.ToString(), a.AnonymousBlobAccess ? "ja" : "nee", a.UnapprovedPrivateEndpoints.ToString(),
+                a.Nsp?.PerimeterName, a.Nsp?.AccessMode,
+                a.Kind, a.Sku, string.Join("; ", a.Tags.Select(t => $"{t.Key}={t.Value}")), a.Resource.Id, a.AzCliEnforceNsp, a.AzCliDisablePublic, a.AzCliExclude,
+            }));
+        await DownloadCsvAsync($"publieke-storage-accounts-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

@@ -1,0 +1,379 @@
+@page "/orphaned-role-assignments"
+@inherits ReportPageBase<OrphanedRoleAssignment>
+@inject OrphanedRoleAssignmentsReport Report
+@inject ArmClient Arm
+@inject AuditLog Audit
+@using AzurePowerTool.Core.Http
+
+<PageTitle>Role assignments van verwijderde identiteiten · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Role assignments van verwijderde identiteiten</h1>
+        <p class="lead">Azure RBAC-toewijzingen waarvan de user, groep of service principal niet meer bestaat in Entra ID.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <div class="toolbar">
+        <button class="btn primary" @onclick="RunReportAsync" disabled="@(Running || _bulkRunning)">@(Running ? "Bezig…" : Result is null ? "Rapport uitvoeren" : "Opnieuw uitvoeren")</button>
+        @if (Running)
+        {
+            <button class="btn" @onclick="Cancel">Annuleren</button>
+        }
+        @if (Status is not null)
+        {
+            <span class="muted">@Status</span>
+        }
+        @if (Result is not null && !Running)
+        {
+            <div class="push-right row-actions">
+                @if (_auditError is not null)
+                {
+                    <span class="error-text">@_auditError (@_auditFailures verwijdering(en) niet gelogd)</span>
+                }
+                @if (_bulkResult is not null && !_bulkRunning)
+                {
+                    <span class="error-text">@_bulkResult</span>
+                }
+                @if (_bulkRunning)
+                {
+                    <span class="muted">@_bulkStatus</span>
+                    <button class="btn" @onclick="() => _bulkCts?.Cancel()">Stoppen</button>
+                }
+                else if (SelectedVisible.Count > 0)
+                {
+                    if (_bulkConfirm)
+                    {
+                        <span>@SelectedVisible.Count role assignment(s) definitief verwijderen?</span>
+                        <button class="btn danger" @onclick="DeleteSelectedAsync">Bevestig</button>
+                        <button class="btn" @onclick="() => _bulkConfirm = false">Annuleer</button>
+                    }
+                    else
+                    {
+                        <button class="btn link" @onclick="() => _selected.Clear()">Selectie wissen</button>
+                        <button class="btn" @onclick="() => _bulkConfirm = true">@SelectedVisible.Count geselecteerde verwijderen</button>
+                    }
+                }
+                <button class="btn" @onclick="ExportAsync">Export CSV</button>
+            </div>
+        }
+    </div>
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterChecks Label="Principal type" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Rol, scope, principal id…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        <p class="summary">
+            <strong>@Filtered.Count</strong> role assignment(s) zonder bestaande principal
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            @if (_deletedCount > 0) { <span class="muted"> · @_deletedCount verwijderd</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="select-col">
+                                @if (DeletableVisible.Count > 0)
+                                {
+                                    <input type="checkbox" title="Alles (zichtbaar) selecteren" disabled="@_bulkRunning"
+                                           checked="@(SelectedVisible.Count == DeletableVisible.Count)" @onchange="ToggleAll" />
+                                }
+                            </th>
+                            <th class="sortable" @onclick='() => SortBy("role")'>Rol@(SortIndicator("role"))</th>
+                            <th class="sortable" @onclick='() => SortBy("level")'>Niveau@(SortIndicator("level"))</th>
+                            <th class="sortable" @onclick='() => SortBy("scope")'>Scope@(SortIndicator("scope"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th class="sortable" @onclick='() => SortBy("principal")'>Principal id@(SortIndicator("principal"))</th>
+                            <th class="sortable" @onclick='() => SortBy("type")'>Oorspr. type@(SortIndicator("type"))</th>
+                            <th class="sortable" @onclick='() => SortBy("created")'>Aangemaakt@(SortIndicator("created"))</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in Filtered)
+                        {
+                            var a = item.Assignment;
+                            <tr class="@(_selected.Contains(a.Id) ? "selected" : null)">
+                                <td class="select-col">
+                                    @if (BlockedReason(item) is null)
+                                    {
+                                        <input type="checkbox" disabled="@(_bulkRunning || _deleting.Contains(a.Id))"
+                                               checked="@_selected.Contains(a.Id)" @onchange="e => Toggle(a.Id, e)" />
+                                    }
+                                </td>
+                                <td><strong>@a.RoleName</strong></td>
+                                <td><span class="badge">@a.ScopeLevel</span></td>
+                                <td class="mono" title="@a.Scope">
+                                    @if (a.ScopeLevel is ScopeLevel.Subscription or ScopeLevel.ResourceGroup or ScopeLevel.Resource)
+                                    {
+                                        <a href="@Portal.AccessControlUrl(Session.Account!.TenantId, a.Scope)" target="_blank" rel="noopener">@a.ScopeName</a>
+                                    }
+                                    else
+                                    {
+                                        @a.ScopeName
+                                    }
+                                </td>
+                                <td>@(a.SubscriptionName ?? "–")</td>
+                                <td class="mono small">@a.PrincipalId
+                                    @if (item.Note is not null) { <div class="muted small">@item.Note</div> }
+                                </td>
+                                <td>@a.PrincipalType</td>
+                                <td class="small">@(a.CreatedOn?.ToLocalTime().ToString("yyyy-MM-dd") ?? "–")</td>
+                                <td>
+                                    <div class="row-actions">
+                                        @if (BlockedReason(item) is { } blocked)
+                                        {
+                                            <button class="btn tiny" disabled title="@blocked">Verwijderen</button>
+                                        }
+                                        else if (_deleting.Contains(a.Id))
+                                        {
+                                            <span class="muted small">Verwijderen…</span>
+                                        }
+                                        else if (_confirmId == a.Id)
+                                        {
+                                            <button class="btn tiny danger" @onclick="() => DeleteAsync(item)">Bevestig</button>
+                                            <button class="btn tiny" @onclick="() => _confirmId = null">Annuleer</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn tiny" title="Deze role assignment verwijderen in Azure" disabled="@_bulkRunning" @onclick="() => _confirmId = a.Id">Verwijderen</button>
+                                        }
+                                    </div>
+                                    @if (_deleteErrors.TryGetValue(a.Id, out var deleteError))
+                                    {
+                                        <div class="row-actions"><span class="error-text small">@deleteError</span></div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Alle role assignments (ook op management group-niveau) worden via Azure Resource Graph
+            opgehaald; daarna wordt elke principal in Entra ID opgezocht. Hiervoor heb je leesrechten op de directory nodig — check
+            <a href="">Mijn toegang</a>. De CSV-export bevat per regel het <span class="mono">az</span>-commando om de toewijzing te verwijderen.
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    protected override Task<ReportResult<OrphanedRoleAssignment>> ExecuteAsync(IProgress<string> progress, CancellationToken ct) =>
+        Report.RunAsync(progress, ct);
+
+    protected override Func<OrphanedRoleAssignment, (string? Key, string? Label)> SubscriptionSelector =>
+        item => (item.Assignment.SubscriptionId, item.Assignment.SubscriptionName ?? item.Assignment.SubscriptionId);
+
+    protected override Func<OrphanedRoleAssignment, string?> TypeSelector => item => item.Assignment.PrincipalType;
+
+    protected override string NoSubscriptionLabel => "(management group / root)";
+
+    protected override IComparable? SortValue(OrphanedRoleAssignment item, string key) => key switch
+    {
+        "role" => item.Assignment.RoleName.ToLowerInvariant(),
+        "level" => (int)item.Assignment.ScopeLevel,
+        "scope" => item.Assignment.ScopeName.ToLowerInvariant(),
+        "subscription" => item.Assignment.SubscriptionName?.ToLowerInvariant(),
+        "principal" => item.Assignment.PrincipalId,
+        "type" => item.Assignment.PrincipalType,
+        "created" => item.Assignment.CreatedOn,
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(OrphanedRoleAssignment item) =>
+        [item.Assignment.RoleName, item.Assignment.Scope, item.Assignment.SubscriptionName, item.Assignment.PrincipalId, item.Assignment.PrincipalType];
+
+    private string? _confirmId;
+    private readonly HashSet<string> _deleting = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _deleteErrors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
+    private int _deletedCount;
+    private bool _bulkConfirm;
+    private bool _bulkRunning;
+    private string? _bulkStatus;
+    private string? _bulkResult;
+    private CancellationTokenSource? _bulkCts;
+
+    private List<OrphanedRoleAssignment> DeletableVisible =>
+        Filtered.Where(i => BlockedReason(i) is null).ToList();
+
+    /// <summary>Every delete must be logged: without a configured audit log, deleting is not possible.</summary>
+    private string? BlockedReason(OrphanedRoleAssignment item) =>
+        item.DeleteBlockedReason ?? (Audit.IsEnabled ? null : "Uitgeschakeld: koppel eerst een logbestand (links onderaan).");
+
+    /// <summary>Only what is selected and still visible with the current filters gets deleted.</summary>
+    private List<OrphanedRoleAssignment> SelectedVisible =>
+        DeletableVisible.Where(i => _selected.Contains(i.Assignment.Id)).ToList();
+
+    private void Toggle(string id, ChangeEventArgs e)
+    {
+        if (e.Value is true) _selected.Add(id); else _selected.Remove(id);
+        _bulkConfirm = false;
+    }
+
+    private void ToggleAll(ChangeEventArgs e)
+    {
+        var ids = DeletableVisible.Select(i => i.Assignment.Id);
+        if (e.Value is true) _selected.UnionWith(ids); else _selected.ExceptWith(ids);
+        _bulkConfirm = false;
+    }
+
+    private async Task RunReportAsync()
+    {
+        ResetDeleteState();
+        await RunAsync();
+    }
+
+    private async Task DeleteAsync(OrphanedRoleAssignment item)
+    {
+        _confirmId = null;
+        await DeleteOneAsync(item, CancellationToken.None, details: "Enkel");
+    }
+
+    private async Task DeleteSelectedAsync()
+    {
+        var items = SelectedVisible;
+        _bulkConfirm = false;
+        _bulkResult = null;
+        _bulkRunning = true;
+        _bulkCts = new CancellationTokenSource();
+        var failed = 0;
+        try
+        {
+            for (var n = 0; n < items.Count && !_bulkCts.IsCancellationRequested; n++)
+            {
+                _bulkStatus = $"Verwijderen {n + 1}/{items.Count}…";
+                StateHasChanged();
+                if (!await DeleteOneAsync(items[n], _bulkCts.Token, details: $"Bulk {n + 1}/{items.Count}")) failed++;
+            }
+            _bulkStatus = null;
+            _bulkResult = failed > 0 ? $"{failed} role assignment(s) konden niet verwijderd worden, zie de foutmelding per rij." : null;
+        }
+        finally
+        {
+            _bulkRunning = false;
+            _bulkCts.Dispose();
+            _bulkCts = null;
+        }
+    }
+
+    private async Task<bool> DeleteOneAsync(OrphanedRoleAssignment item, CancellationToken ct, string details)
+    {
+        var a = item.Assignment;
+        var id = a.Id;
+        var name = $"{a.RoleName} · {a.ScopeName}";
+        var auditDetails = $"{details} · Principal {a.PrincipalId} ({a.PrincipalType}) · Scope {a.Scope}";
+        _deleteErrors.Remove(id);
+        _deleting.Add(id);
+        try
+        {
+            await Arm.DeleteRoleAssignmentAsync(id, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            _deleting.Remove(id);
+            return true; // Stopped by the user before the call went out: not a failure, nothing changed.
+        }
+        catch (Exception ex)
+        {
+            _deleteErrors[id] = ex switch
+            {
+                AzureApiException api when api.IsForbidden => "Geen rechten: je hebt Owner, User Access Administrator of RBAC Administrator nodig op deze scope.",
+                AzureApiException api => api.ApiMessage,
+                _ => ex.Message,
+            };
+            await AuditAsync(id, name, false, auditDetails, ex is AzureApiException e ? $"{(int)e.Status} {e.Code}: {e.ApiMessage}" : ex.Message);
+            _deleting.Remove(id);
+            return false;
+        }
+
+        RemoveFromResult(item);
+        _selected.Remove(id);
+        _deletedCount++;
+        _deleting.Remove(id);
+        if (!await AuditAsync(id, name, true, auditDetails, null)) _auditFailures++;
+        return true;
+    }
+
+    private int _auditFailures;
+
+    /// <summary>Never lets a logging problem hide the result of the delete itself.</summary>
+    private async Task<bool> AuditAsync(string id, string name, bool success, string details, string? error)
+    {
+        try
+        {
+            await Audit.WriteAsync(AuditActions.RoleAssignmentDelete, id, name, success, details, error);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _auditError = $"Loggen in de activiteitenlog mislukte: {ex.Message}";
+            return false;
+        }
+    }
+
+    private string? _auditError;
+
+    private void ResetDeleteState()
+    {
+        _bulkCts?.Cancel();
+        _confirmId = null;
+        _bulkConfirm = false;
+        _deleting.Clear();
+        _deleteErrors.Clear();
+        _selected.Clear();
+        _deletedCount = 0;
+        _bulkResult = null;
+        _auditError = null;
+        _auditFailures = 0;
+    }
+
+    protected override Task OnSessionChangedAsync()
+    {
+        ResetDeleteState();
+        return base.OnSessionChangedAsync();
+    }
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Role", "ScopeLevel", "Scope", "Subscription", "PrincipalId", "PrincipalType", "CreatedOn", "CreatedBy", "Note", "RoleAssignmentId", "AzCliDelete"],
+            Filtered.Select(item =>
+            {
+                var a = item.Assignment;
+                return new[]
+                {
+                    a.RoleName, a.ScopeLevel.ToString(), a.Scope, a.SubscriptionName, a.PrincipalId, a.PrincipalType,
+                    a.CreatedOn?.ToString("yyyy-MM-dd HH:mm"), a.CreatedBy, item.Note, a.Id,
+                    $"az role assignment delete --ids \"{a.Id}\"",
+                };
+            }));
+        await DownloadCsvAsync($"role-assignments-zonder-user-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

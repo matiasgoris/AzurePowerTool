@@ -1,0 +1,12 @@
+<span class="badge @Css">@Value.Label()</span>
+
+@code {
+    [Parameter, EditorRequired] public Severity Value { get; set; }
+
+    private string Css => Value switch
+    {
+        Severity.High => "err",
+        Severity.Medium => "warn",
+        _ => "",
+    };
+}

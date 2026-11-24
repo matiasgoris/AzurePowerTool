@@ -1,0 +1,173 @@
+@page "/orphaned-dns-records"
+@inherits ReportPageBase<OrphanedDnsRecord>
+@inject OrphanedDnsRecordsReport Report
+
+<PageTitle>Verweesde DNS-records · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Verweesde DNS-records</h1>
+        <p class="lead">A-, CNAME- en aliasrecords in private en publieke Azure DNS-zones die naar een IP, naam of resource wijzen die niet meer bestaat.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <ReportToolbar Running="Running" Status="@Status" HasResult="Result is not null" OnRun="RunAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <SeverityFilter @bind-Value="MinSeverity" />
+            <FilterChecks Label="Zone" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Zone, record, IP, VNet, subnet…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        var verified = Filtered.Where(r => r.Verified).ToList();
+        var unverified = Filtered.Where(r => !r.Verified).ToList();
+
+        <WarningList Items="Result.Warnings" />
+        <p class="summary">
+            <strong>@verified.Count</strong> geverifieerd · <strong>@unverified.Count</strong> niet verifieerbaar
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> (van @Result.Items.Count)</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        <section class="card">
+            <h2><span class="badge err">Geverifieerd verweesd</span> @verified.Count</h2>
+            <p class="muted small">
+                Het IP ligt in een VNet/subnet dat je volledig kan zien en geen enkele resource gebruikt het,
+                of het CNAME- of aliasdoel bestaat aantoonbaar niet meer. Deze records kan je met vertrouwen opruimen.
+            </p>
+            @if (verified.Count > 0) { @RecordTable(verified) }
+            else { <p class="muted">Geen.</p> }
+        </section>
+
+        <section class="card">
+            <h2><span class="badge warn">Niet verifieerbaar</span> @unverified.Count</h2>
+            <p class="muted small">
+                Er is niets gevonden dat het IP of de naam gebruikt, maar het kon niet bevestigd worden op een VNet/subnet:
+                het IP ligt buiten elk zichtbaar VNet, of in een subnet waar diensten IP's gebruiken die nergens zichtbaar zijn.
+                De kolom <em>Waarom</em> zegt wat ontbrak. Controleer deze zelf voor je iets verwijdert.
+            </p>
+            @if (unverified.Count > 0) { @RecordTable(unverified) }
+            else { <p class="muted">Geen.</p> }
+        </section>
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Per zone worden de records gelezen (alleen lezen) en gecontroleerd:
+            <ul>
+                <li><strong>A-records:</strong> wordt het IP gebruikt door een NIC, load balancer, private endpoint, Application Gateway, firewall,
+                    DNS resolver, container group, API Management of public IP? Zo niet, dan wordt het IP opgezocht in de VNets en subnets.
+                    Alleen als het subnet volledig zichtbaar is (geen delegatie, geen dienst-subnet, alle IP-configuraties leesbaar) geldt het als <em>geverifieerd</em>.</li>
+                <li><strong>CNAME-records:</strong> bestaat het doel in je eigen zone, of anders via DNS (de resolver van deze machine)?</li>
+                <li><strong>Aliasrecords:</strong> bestaat de resource waar de alias naar wijst nog?</li>
+            </ul>
+            AAAA-, MX-, TXT-, SRV- en NS-records en automatisch geregistreerde VM-records worden niet gecontroleerd.
+            Per record een <span class="mono">az</span>-commando om het op te ruimen; de tool voert dat zelf niet uit.
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    private RenderFragment RecordTable(IReadOnlyList<OrphanedDnsRecord> rows) =>
+        @<div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th class="sortable" @onclick='() => SortBy("severity")'>Ernst@(SortIndicator("severity"))</th>
+                        <th class="sortable" @onclick='() => SortBy("record")'>Record@(SortIndicator("record"))</th>
+                        <th class="sortable" @onclick='() => SortBy("target")'>Wijst naar@(SortIndicator("target"))</th>
+                        <th class="sortable" @onclick='() => SortBy("basis")'>Verificatie@(SortIndicator("basis"))</th>
+                        <th>Waarom</th>
+                        <th class="sortable" @onclick='() => SortBy("subscription")'>Zone / subscription@(SortIndicator("subscription"))</th>
+                        <th>Opruimen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in rows)
+                    {
+                        <tr>
+                            <td><SeverityBadge Value="r.Severity" /></td>
+                            <td>
+                                <strong>@r.Fqdn</strong>
+                                <div class="muted small">@r.RecordType@(r.Ttl is { } ttl ? $" · TTL {ttl}" : "")</div>
+                            </td>
+                            <td class="mono small">
+                                @r.Target
+                                @if (r.OtherTargets.Count > 0)
+                                {
+                                    <div class="muted">nog in gebruik: @string.Join(", ", r.OtherTargets)</div>
+                                }
+                            </td>
+                            <td>
+                                <span class="badge @(r.Verified ? "err" : "warn")">@r.VerificationLabel</span>
+                                @foreach (var network in r.CheckedNetworks)
+                                {
+                                    <div class="muted small">@network</div>
+                                }
+                            </td>
+                            <td class="small">@r.Reason</td>
+                            <td>
+                                <a href="@Portal.ResourceUrl(Session.Account!.TenantId, r.Zone.Id)" target="_blank" rel="noopener">@r.Zone.Name</a>
+                                <span class="badge">@(r.ZoneKind == DnsZoneKind.Private ? "privé" : "publiek")</span>
+                                <div class="muted small">@r.Zone.SubscriptionName · @r.Zone.ResourceGroup</div>
+                            </td>
+                            <td><CopyCommand Command="@r.AzCliDelete" /></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>;
+
+    protected override Task<ReportResult<OrphanedDnsRecord>> ExecuteAsync(IProgress<string> progress, CancellationToken ct) =>
+        Report.RunAsync(progress, ct);
+
+    protected override Func<OrphanedDnsRecord, (string? Key, string? Label)> SubscriptionSelector =>
+        r => (r.Zone.SubscriptionId, r.Zone.SubscriptionName);
+
+    protected override Func<OrphanedDnsRecord, Severity> SeveritySelector => r => r.Severity;
+
+    protected override Func<OrphanedDnsRecord, string?> TypeSelector => r => r.ZoneKind == DnsZoneKind.Private ? "Privé" : "Publiek";
+
+    protected override IComparable? SortValue(OrphanedDnsRecord r, string key) => key switch
+    {
+        "severity" => (int)r.Severity,
+        "record" => r.Fqdn.ToLowerInvariant(),
+        "target" => r.Target.ToLowerInvariant(),
+        "basis" => (int)r.Basis,
+        "subscription" => $"{r.Zone.SubscriptionName}/{r.Zone.Name}".ToLowerInvariant(),
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(OrphanedDnsRecord r) =>
+        [r.Fqdn, r.RecordName, r.RecordType, r.Target, r.Reason, r.Zone.Name, r.Zone.ResourceGroup, r.Zone.SubscriptionName, r.VerificationLabel, .. r.CheckedNetworks];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Verified", "Verification", "Severity", "Fqdn", "RecordType", "Target", "OtherTargets", "CheckedNetworks", "Reason", "Zone", "ZoneKind", "ResourceGroup", "Subscription", "ZoneId", "AzCliDelete"],
+            Filtered.Select(r => new[]
+            {
+                r.Verified ? "ja" : "nee", r.VerificationLabel, r.Severity.Label(), r.Fqdn, r.RecordType, r.Target,
+                string.Join(", ", r.OtherTargets), string.Join(" | ", r.CheckedNetworks), r.Reason,
+                r.Zone.Name, r.ZoneKind == DnsZoneKind.Private ? "privé" : "publiek", r.Zone.ResourceGroup, r.Zone.SubscriptionName,
+                r.Zone.Id, r.AzCliDelete,
+            }));
+        await DownloadCsvAsync($"verweesde-dns-records-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

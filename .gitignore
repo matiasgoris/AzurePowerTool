@@ -1,0 +1,24 @@
+# .NET
+[Bb]in/
+[Oo]bj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.pdb
+*.cache
+*.log
+TestResults/
+publish/
+*.nupkg
+
+# Local settings (e.g. your own app registration for development)
+appsettings.Local.json
+appsettings.*.Local.json
+*.local.json
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db

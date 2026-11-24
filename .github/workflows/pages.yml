@@ -1,0 +1,70 @@
+# Builds the app (Blazor WebAssembly: static files only) and publishes it on GitHub Pages.
+# One-time: Settings → Pages → Source: "GitHub Actions".
+# Optional repository variables (Settings → Secrets and variables → Actions → Variables):
+#   AZURE_CLIENT_ID  app registration (SPA) used for sign-in; overrides Auth:ClientId in appsettings.json
+#   AZURE_TENANT_ID  default tenant (id or domain); empty = the user's own tenant
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Publish
+        run: dotnet publish src/AzurePowerTool.Web -c Release -o publish -p:Version=1.0.${{ github.run_number }}
+
+      - name: Prepare for GitHub Pages
+        working-directory: publish/wwwroot
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          # The site lives under /<repo>/ (or / for a custom domain or private Pages).
+          sed -i "s|<base href=\"/\" />|<base href=\"${BASE_PATH}/\" />|" index.html
+          if [ -n "$CLIENT_ID" ]; then
+            jq --arg c "$CLIENT_ID" --arg t "$TENANT_ID" '.Auth.ClientId = $c | .Auth.TenantId = $t' appsettings.json > appsettings.tmp
+            mv appsettings.tmp appsettings.json
+          fi
+          # Pages doesn't serve pre-compressed files.
+          find . -name '*.br' -delete -o -name '*.gz' -delete
+          # Deep links (e.g. /AzurePowerTool/unused-resources): Pages serves 404.html, the app routes from there.
+          cp index.html 404.html
+          # Otherwise Jekyll hides _framework.
+          touch .nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: publish/wwwroot
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,201 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject BrowserSession Session
+@inject LogFileStore LogFile
+@inject ArmClient Arm
+
+<div class="shell">
+    <aside class="sidebar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true">⚡</span>
+            <span>Azure PowerTool</span>
+        </div>
+
+        <nav class="nav">
+            <NavLink href="" Match="NavLinkMatch.All">Mijn toegang</NavLink>
+            <div class="nav-section">Rapporten</div>
+            <NavLink href="empty-resource-groups">Lege resourcegroepen</NavLink>
+            @* Voorlopig verborgen (pagina blijft bereikbaar via de URL):
+            <NavLink href="empty-aks-namespaces">Lege AKS-namespaces</NavLink>
+            *@
+            <NavLink href="orphaned-role-assignments">Role assignments van verwijderde identiteiten</NavLink>
+            <div class="nav-section">Remediatie</div>
+            @* Voorlopig verborgen (pagina's blijven bereikbaar via de URL):
+            <NavLink href="app-credentials">App secrets & certificaten</NavLink>
+            <NavLink href="open-ports">Open poorten naar internet</NavLink>
+            <NavLink href="insecure-config">Onveilige configuratie</NavLink>
+            *@
+            <NavLink href="unused-resources">Ongebruikte resources</NavLink>
+            <NavLink href="orphaned-dns-records">Verweesde DNS-records</NavLink>
+            <NavLink href="public-storage">Publieke storage accounts</NavLink>
+            <NavLink href="storage-sas">SAS-gebruik op storage</NavLink>
+            <div class="nav-section">Beheer</div>
+            <NavLink href="activity-log">Activiteitenlog</NavLink>
+        </nav>
+
+        @if (Session.Account is { } account)
+        {
+            <div class="account">
+                <div class="label">Aangemeld als</div>
+                <div class="user" title="@account.Username">@account.Username</div>
+
+                <label class="label" for="tenant-select">Tenant</label>
+                <select id="tenant-select" value="@account.TenantId" @onchange="OnTenantChangedAsync" disabled="@_switching">
+                        @if (!_tenants.Any(t => t.TenantId == account.TenantId))
+                        {
+                            <option value="@account.TenantId">@account.TenantId</option>
+                        }
+                        @foreach (var tenant in _tenants)
+                        {
+                            <option value="@tenant.TenantId">@tenant.Label</option>
+                        }
+                    </select>
+                @if (_switching)
+                {
+                    <div class="muted small">Wisselen… (mogelijk moet je opnieuw aanmelden)</div>
+                }
+                @if (_tenantError is not null)
+                {
+                    <div class="small error-text">@_tenantError</div>
+                }
+
+                <button class="btn link" @onclick="SignOutAsync">Afmelden</button>
+            </div>
+        }
+        else if (_resuming)
+        {
+            <div class="account muted small">Vorige sessie herstellen…</div>
+        }
+
+        <div class="logfile">
+            <div class="label">Logbestand</div>
+            @switch (LogFile.State)
+            {
+                case LogFileState.Unsupported:
+                    <div class="small">Deze browser kan geen bestand bewaren. Gebruik Edge of Chrome om te aanvaarden en te verwijderen.</div>
+                    break;
+                case LogFileState.Connected:
+                    <div class="user" title="@LogFile.FileName">@LogFile.FileName</div>
+                    <button class="btn link" @onclick="() => RunLogFileAsync(LogFile.DisconnectAsync)">Ander bestand</button>
+                    break;
+                case LogFileState.NeedsPermission:
+                    <div class="user" title="@LogFile.FileName">@LogFile.FileName</div>
+                    <button class="btn small-btn" @onclick="() => RunLogFileAsync(LogFile.ReconnectAsync)">Toegang geven</button>
+                    <button class="btn link" @onclick="() => RunLogFileAsync(LogFile.DisconnectAsync)">Ander bestand</button>
+                    break;
+                default:
+                    <div class="small">Nodig om te aanvaarden en te verwijderen (alles wordt erin gelogd).</div>
+                    <div class="logfile-actions">
+                        <button class="btn small-btn" @onclick="() => RunLogFileAsync(LogFile.CreateAsync)">Nieuw…</button>
+                        <button class="btn small-btn" @onclick="() => RunLogFileAsync(LogFile.OpenAsync)">Openen…</button>
+                    </div>
+                    break;
+            }
+            @if (_logFileError is not null)
+            {
+                <div class="small error-text">@_logFileError</div>
+            }
+        </div>
+
+        <div class="app-version" title="Versie">v@(AppVersion.Display)</div>
+    </aside>
+
+    <main class="content">
+        @Body
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    Er is een onverwachte fout opgetreden.
+    <a href="." class="reload">Herladen</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private IReadOnlyList<TenantInfo> _tenants = [];
+    private bool _resuming;
+    private bool _switching;
+    private string? _tenantError;
+
+    private string? _logFileError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Session.Changed += OnSessionChanged;
+        LogFile.Changed += OnLogFileChanged;
+        await RunLogFileAsync(LogFile.InitializeAsync);
+
+        if (Session.IsSignedIn)
+        {
+            await LoadTenantsAsync();
+            return;
+        }
+
+        _resuming = true;
+        await Session.TryResumeAsync(); // raises Changed on success → tenants load there
+        _resuming = false;
+    }
+
+    private void OnSessionChanged() => _ = InvokeAsync(async () =>
+    {
+        if (Session.IsSignedIn) await LoadTenantsAsync();
+        else _tenants = [];
+        StateHasChanged();
+    });
+
+    private async Task LoadTenantsAsync()
+    {
+        try
+        {
+            _tenants = await Arm.GetTenantsAsync();
+            _tenantError = null;
+        }
+        catch (Exception ex)
+        {
+            _tenantError = $"Tenants ophalen mislukt: {ex.Message}";
+        }
+    }
+
+    private async Task OnTenantChangedAsync(ChangeEventArgs e)
+    {
+        if (e.Value is not string tenantId || tenantId == Session.Account?.TenantId) return;
+
+        _switching = true;
+        _tenantError = null;
+        try
+        {
+            await Session.SwitchTenantAsync(tenantId);
+        }
+        catch (Exception ex)
+        {
+            _tenantError = $"Wisselen mislukt: {ex.Message}";
+        }
+        finally
+        {
+            _switching = false;
+        }
+    }
+
+    private async Task SignOutAsync() => await Session.SignOutAsync();
+
+    private void OnLogFileChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task RunLogFileAsync(Func<Task> action)
+    {
+        _logFileError = null;
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            _logFileError = ex.Message;
+        }
+    }
+
+    public void Dispose()
+    {
+        Session.Changed -= OnSessionChanged;
+        LogFile.Changed -= OnLogFileChanged;
+    }
+}

@@ -1,0 +1,404 @@
+@page "/empty-resource-groups"
+@inherits ReportPageBase<EmptyResourceGroup>
+@inject EmptyResourceGroupsReport Report
+@inject ArmClient Arm
+@inject AuditLog Audit
+@using AzurePowerTool.Core.Http
+
+<PageTitle>Lege resourcegroepen · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Lege resourcegroepen</h1>
+        <p class="lead">Resourcegroepen zonder resources, over alle subscriptions die je in deze tenant kan zien.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <div class="toolbar">
+        <button class="btn primary" @onclick="RunReportAsync" disabled="@(Running || _bulkRunning)">@(Running ? "Bezig…" : Result is null ? "Rapport uitvoeren" : "Opnieuw uitvoeren")</button>
+        @if (Running)
+        {
+            <button class="btn" @onclick="Cancel">Annuleren</button>
+        }
+        @if (Status is not null)
+        {
+            <span class="muted">@Status</span>
+        }
+        @if (Result is not null && !Running)
+        {
+            <div class="push-right row-actions">
+                @if (_auditError is not null)
+                {
+                    <span class="error-text">@_auditError</span>
+                }
+                @if (_bulkRunning)
+                {
+                    <span class="muted">@_bulkStatus</span>
+                    <button class="btn" @onclick="() => _bulkCts?.Cancel()" title="Lopende verwijderingen gaan door, nieuwe starten niet meer">Stoppen</button>
+                }
+                else if (SelectedVisible.Count > 0)
+                {
+                    if (_bulkConfirm)
+                    {
+                        <span>@SelectedVisible.Count resourcegroep(en) definitief verwijderen?</span>
+                        <button class="btn danger" @onclick="DeleteSelectedAsync">Bevestig</button>
+                        <button class="btn" @onclick="() => _bulkConfirm = false">Annuleer</button>
+                    }
+                    else
+                    {
+                        <button class="btn link" @onclick="() => _selected.Clear()">Selectie wissen</button>
+                        <button class="btn" @onclick="() => _bulkConfirm = true">@SelectedVisible.Count geselecteerde verwijderen</button>
+                    }
+                }
+                <button class="btn" @onclick="ExportAsync">Export CSV</button>
+            </div>
+        }
+    </div>
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterMulti Label="Regio's" Options="RegionOptions" Selected="SelectedRegions" OnChanged="StateHasChanged" />
+            <label class="filter-select">
+                <span class="label">Leeftijd</span>
+                <select class="input @(MinAgeDays > 0 ? "active" : "")" @bind="MinAgeDays">
+                    <option value="0">Alle</option>
+                    <option value="30">Ouder dan 30 dagen</option>
+                    <option value="90">Ouder dan 90 dagen</option>
+                    <option value="180">Ouder dan 180 dagen</option>
+                    <option value="365">Ouder dan 1 jaar</option>
+                    <option value="730">Ouder dan 2 jaar</option>
+                </select>
+            </label>
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Naam, managed by, tag…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        <p class="summary">
+            <strong>@Filtered.Count</strong> lege resourcegroep(en)
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            @if (_deletedCount > 0) { <span class="muted"> · @_deletedCount verwijderd</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="select-col">
+                                @if (DeletableVisible.Count > 0)
+                                {
+                                    <input type="checkbox" title="Alles (zichtbaar) selecteren" disabled="@_bulkRunning"
+                                           checked="@(SelectedVisible.Count == DeletableVisible.Count)" @onchange="ToggleAll" />
+                                }
+                            </th>
+                            <th class="sortable" @onclick='() => SortBy("name")'>Resourcegroep@(SortIndicator("name"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th class="sortable" @onclick='() => SortBy("location")'>Locatie@(SortIndicator("location"))</th>
+                            <th class="sortable" @onclick='() => SortBy("created")'>Aangemaakt@(SortIndicator("created"))</th>
+                            <th class="sortable" @onclick='() => SortBy("managedBy")'>Managed by@(SortIndicator("managedBy"))</th>
+                            <th>Tags</th>
+                            <th class="sortable" @onclick='() => SortBy("status")'>Status@(SortIndicator("status"))</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var rg in Filtered)
+                        {
+                            var blocked = BlockedReason(rg);
+                            <tr class="@(_selected.Contains(rg.Id) ? "selected" : null)">
+                                <td class="select-col">
+                                    @if (blocked is null)
+                                    {
+                                        <input type="checkbox" disabled="@(_bulkRunning || _deleting.Contains(rg.Id))"
+                                               checked="@_selected.Contains(rg.Id)" @onchange="e => Toggle(rg.Id, e)" />
+                                    }
+                                </td>
+                                <td><a href="@Portal.ResourceUrl(Session.Account!.TenantId, rg.Id)" target="_blank" rel="noopener"><strong>@rg.Name</strong></a></td>
+                                <td>@rg.SubscriptionName</td>
+                                <td>@rg.Location</td>
+                                <td class="nowrap" title="@rg.CreatedTime?.ToLocalTime().ToString("yyyy-MM-dd HH:mm")">
+                                    @if (rg.CreatedTime is { } created)
+                                    {
+                                        @created.ToLocalTime().ToString("yyyy-MM-dd")
+                                        <div class="muted small">@rg.AgeInDays dagen geleden</div>
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">onbekend</span>
+                                    }
+                                </td>
+                                <td class="mono small">@(rg.ManagedBy is null ? "" : ScopeParser.Name(rg.ManagedBy))</td>
+                                <td>@foreach (var tag in rg.Tags){<span class="chip small">@tag.Key: @tag.Value</span>}</td>
+                                <td>
+                                    @switch (rg.Verification)
+                                    {
+                                        case VerificationStatus.ConfirmedEmpty: <span class="badge ok">Bevestigd leeg</span> break;
+                                        case VerificationStatus.Failed: <span class="badge warn">Niet geverifieerd</span> break;
+                                        default: <span class="badge">–</span> break;
+                                    }
+                                </td>
+                                <td>
+                                    <div class="row-actions">
+                                        @if (blocked is not null)
+                                        {
+                                            <button class="btn tiny" disabled title="@blocked">Verwijderen</button>
+                                        }
+                                        else if (_deleting.Contains(rg.Id))
+                                        {
+                                            <span class="muted small">Verwijderen…</span>
+                                        }
+                                        else if (_confirmId == rg.Id)
+                                        {
+                                            <button class="btn tiny danger" @onclick="() => DeleteAsync(rg)">Bevestig</button>
+                                            <button class="btn tiny" @onclick="() => _confirmId = null">Annuleer</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn tiny" title="Deze resourcegroep verwijderen in Azure" disabled="@_bulkRunning" @onclick="() => _confirmId = rg.Id">Verwijderen</button>
+                                        }
+                                    </div>
+                                    @if (_deleteErrors.TryGetValue(rg.Id, out var deleteError))
+                                    {
+                                        <div class="row-actions"><span class="error-text small">@deleteError</span></div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Kandidaten worden eerst via Azure Resource Graph gezocht en daarna één voor één
+            rechtstreeks bij Azure Resource Manager gecontroleerd. Resourcegroepen met <em>Managed by</em> worden door een andere dienst
+            beheerd (bv. AKS, Databricks): die kan je hier niet verwijderen. Bij elke verwijdering wordt de groep vlak ervoor nog eens bij ARM
+            gecontroleerd op resources, en alles komt in de <a href="activity-log">activiteitenlog</a>.
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    protected override Task<ReportResult<EmptyResourceGroup>> ExecuteAsync(IProgress<string> progress, CancellationToken ct) =>
+        Report.RunAsync(progress, ct);
+
+    protected override Func<EmptyResourceGroup, (string? Key, string? Label)> SubscriptionSelector =>
+        rg => (rg.SubscriptionId, rg.SubscriptionName);
+
+    protected override Func<EmptyResourceGroup, string?> RegionSelector => rg => rg.Location;
+
+    private int MinAgeDays { get; set; }
+
+    // Resource groups without a known creation date are hidden while an age filter is active.
+    protected override bool ExtraFilter(EmptyResourceGroup rg) => MinAgeDays == 0 || rg.AgeInDays >= MinAgeDays;
+    protected override bool HasExtraFilters => MinAgeDays > 0;
+    protected override void ClearExtraFilters() => MinAgeDays = 0;
+
+    protected override IComparable? SortValue(EmptyResourceGroup rg, string key) => key switch
+    {
+        "name" => rg.Name.ToLowerInvariant(),
+        "subscription" => rg.SubscriptionName.ToLowerInvariant(),
+        "location" => rg.Location,
+        "created" => rg.CreatedTime,
+        "managedBy" => rg.ManagedBy?.ToLowerInvariant(),
+        "status" => rg.Verification.ToString(),
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(EmptyResourceGroup rg) =>
+        [rg.Name, rg.SubscriptionName, rg.SubscriptionId, rg.Location, rg.ManagedBy, .. rg.Tags.Select(t => $"{t.Key}: {t.Value}")];
+
+    // ---- Deleting (single and bulk). Every attempt is written to the audit log.
+    private const int BulkParallelism = 4;
+    private static readonly TimeSpan MaxWaitPerGroup = TimeSpan.FromMinutes(3);
+
+    private string? _confirmId;
+    private readonly HashSet<string> _deleting = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _deleteErrors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
+    private int _deletedCount;
+    private bool _bulkConfirm;
+    private bool _bulkRunning;
+    private string? _bulkStatus;
+    private CancellationTokenSource? _bulkCts;
+    private string? _auditError;
+
+    private string? BlockedReason(EmptyResourceGroup rg) =>
+        !Audit.IsEnabled ? "Uitgeschakeld: koppel eerst een logbestand (links onderaan)."
+        : rg.ManagedBy is not null ? "Wordt beheerd door een andere dienst (Managed by): niet verwijderen vanuit de tool."
+        : rg.Verification != VerificationStatus.ConfirmedEmpty ? "Niet bevestigd leeg via ARM: voer het rapport opnieuw uit."
+        : null;
+
+    private List<EmptyResourceGroup> DeletableVisible => Filtered.Where(rg => BlockedReason(rg) is null).ToList();
+
+    private List<EmptyResourceGroup> SelectedVisible => DeletableVisible.Where(rg => _selected.Contains(rg.Id)).ToList();
+
+    private void Toggle(string id, ChangeEventArgs e)
+    {
+        if (e.Value is true) _selected.Add(id); else _selected.Remove(id);
+        _bulkConfirm = false;
+    }
+
+    private void ToggleAll(ChangeEventArgs e)
+    {
+        var ids = DeletableVisible.Select(rg => rg.Id);
+        if (e.Value is true) _selected.UnionWith(ids); else _selected.ExceptWith(ids);
+        _bulkConfirm = false;
+    }
+
+    private async Task RunReportAsync()
+    {
+        ResetDeleteState();
+        await RunAsync();
+    }
+
+    private async Task DeleteAsync(EmptyResourceGroup rg)
+    {
+        _confirmId = null;
+        await DeleteOneAsync(rg, "Enkel", CancellationToken.None);
+    }
+
+    private async Task DeleteSelectedAsync()
+    {
+        var items = SelectedVisible;
+        _bulkConfirm = false;
+        _bulkRunning = true;
+        _bulkCts = new CancellationTokenSource();
+        var done = 0;
+        var failed = 0;
+        _bulkStatus = $"Verwijderen 0/{items.Count}…";
+        using var gate = new SemaphoreSlim(BulkParallelism);
+        try
+        {
+            // Runs on the circuit's synchronization context, so the state below is never touched concurrently.
+            await Task.WhenAll(items.Select(async (rg, n) =>
+            {
+                await gate.WaitAsync();
+                try
+                {
+                    if (_bulkCts.IsCancellationRequested) return;
+                    if (!await DeleteOneAsync(rg, $"Bulk {n + 1}/{items.Count}", CancellationToken.None)) failed++;
+                    _bulkStatus = $"Verwijderen {++done}/{items.Count}…";
+                    StateHasChanged();
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }));
+        }
+        finally
+        {
+            _bulkStatus = null;
+            _bulkRunning = false;
+            _bulkCts.Dispose();
+            _bulkCts = null;
+        }
+        if (failed > 0) _auditError = $"{failed} resourcegroep(en) niet verwijderd, zie de melding per rij.";
+    }
+
+    private async Task<bool> DeleteOneAsync(EmptyResourceGroup rg, string mode, CancellationToken ct)
+    {
+        var details = $"{mode} · Subscription {rg.SubscriptionName} ({rg.SubscriptionId}) · Locatie {rg.Location}";
+        _deleteErrors.Remove(rg.Id);
+        _deleting.Add(rg.Id);
+        StateHasChanged();
+        try
+        {
+            // ARM deletes everything inside a resource group: check again right before deleting.
+            if (await Arm.ResourceGroupHasResourcesAsync(rg.SubscriptionId, rg.Name, ct))
+            {
+                _deleteErrors[rg.Id] = "Niet verwijderd: de resourcegroep bevat intussen resources.";
+                await AuditAsync(rg, false, details, "Afgebroken: bevat intussen resources");
+                return false;
+            }
+
+            var finished = await Arm.DeleteResourceGroupAsync(rg.SubscriptionId, rg.Name, MaxWaitPerGroup, ct);
+            RemoveFromResult(rg);
+            _selected.Remove(rg.Id);
+            _deletedCount++;
+            await AuditAsync(rg, true, finished ? details : details + " · Na 3 minuten nog bezig in Azure", null);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _deleteErrors[rg.Id] = ex switch
+            {
+                AzureApiException api when api.IsForbidden => "Geen rechten: je hebt Contributor of Owner nodig op de resourcegroep.",
+                AzureApiException { Code: "ScopeLocked" } => "Er staat een lock op de resourcegroep of de subscription.",
+                AzureApiException api => api.ApiMessage,
+                _ => ex.Message,
+            };
+            await AuditAsync(rg, false, details, ex is AzureApiException e ? $"{(int)e.Status} {e.Code}: {e.ApiMessage}" : ex.Message);
+            return false;
+        }
+        finally
+        {
+            _deleting.Remove(rg.Id);
+        }
+    }
+
+    /// <summary>A logging problem never hides the result of the delete itself.</summary>
+    private async Task AuditAsync(EmptyResourceGroup rg, bool success, string details, string? error)
+    {
+        try
+        {
+            await Audit.WriteAsync(AuditActions.ResourceGroupDelete, rg.Id, rg.Name, success, details, error);
+        }
+        catch (Exception ex)
+        {
+            _auditError = $"Loggen in de activiteitenlog mislukte: {ex.Message}";
+        }
+    }
+
+    private void ResetDeleteState()
+    {
+        _bulkCts?.Cancel();
+        _confirmId = null;
+        _bulkConfirm = false;
+        _deleting.Clear();
+        _deleteErrors.Clear();
+        _selected.Clear();
+        _deletedCount = 0;
+        _auditError = null;
+    }
+
+    protected override Task OnSessionChangedAsync()
+    {
+        ResetDeleteState();
+        return base.OnSessionChangedAsync();
+    }
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Subscription", "SubscriptionId", "ResourceGroup", "Location", "CreatedTime", "AgeInDays", "ManagedBy", "Tags", "Status", "ResourceId"],
+            Filtered.Select(rg => new[]
+            {
+                rg.SubscriptionName, rg.SubscriptionId, rg.Name, rg.Location,
+                rg.CreatedTime?.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), rg.AgeInDays?.ToString(), rg.ManagedBy,
+                string.Join(", ", rg.Tags.Select(t => $"{t.Key}={t.Value}")),
+                rg.Verification.ToString(), rg.Id,
+            }));
+        await DownloadCsvAsync($"lege-resourcegroepen-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}

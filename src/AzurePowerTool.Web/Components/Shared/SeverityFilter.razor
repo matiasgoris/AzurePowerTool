@@ -1,0 +1,16 @@
+<label class="filter-select">
+    <span class="label">Ernst</span>
+    <select class="input @(Value != Severity.Low ? "active" : "")" value="@Value" @onchange="ChangedAsync">
+        <option value="@Severity.Low">Alle</option>
+        <option value="@Severity.Medium">Middel en hoog</option>
+        <option value="@Severity.High">Alleen hoog</option>
+    </select>
+</label>
+
+@code {
+    [Parameter] public Severity Value { get; set; }
+    [Parameter] public EventCallback<Severity> ValueChanged { get; set; }
+
+    private Task ChangedAsync(ChangeEventArgs e) =>
+        Enum.TryParse<Severity>(e.Value?.ToString(), out var severity) ? ValueChanged.InvokeAsync(severity) : Task.CompletedTask;
+}

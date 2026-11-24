@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="nl">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The GitHub Pages workflow sets the base path (e.g. /AzurePowerTool/). -->
+    <base href="/" />
+    <title>Azure PowerTool</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+</head>
+
+<body>
+    <div id="app">
+        <div class="boot">Azure PowerTool laden…</div>
+    </div>
+
+    <div id="blazor-error-ui" data-nosnippet>
+        Er is een onverwachte fout opgetreden.
+        <a href="." class="reload">Herladen</a>
+        <span class="dismiss">🗙</span>
+    </div>
+
+    <script src="lib/msal-browser-4.30.0/msal-browser.min.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/logfile.js"></script>
+    <script src="js/app.js"></script>
+    <script src="_framework/blazor.webassembly.js" autostart="false"></script>
+    <script>
+        // Handle the redirect back from the Microsoft sign-in before the app starts routing.
+        powerToolAuth.init().finally(() => Blazor.start());
+    </script>
+</body>
+
+</html>

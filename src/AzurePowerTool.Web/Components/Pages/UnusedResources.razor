@@ -1,0 +1,366 @@
+@page "/unused-resources"
+@inherits ReportPageBase<UnusedResource>
+@inject UnusedResourcesReport Report
+@inject AcknowledgementStore Acknowledgements
+
+<PageTitle>Ongebruikte resources · Azure PowerTool</PageTitle>
+
+<header class="page-header">
+    <div>
+        <h1>Ongebruikte resources</h1>
+        <p class="lead">Disks, public IP's, netwerkinterfaces en NSG's die nergens aan gekoppeld zijn, App Service plans zonder apps, en storage accounts zonder transacties in 30 dagen.</p>
+    </div>
+</header>
+
+<SignInRequired>
+    <ReportToolbar Running="@(Running || _bulkRunning)" Status="@Status" HasResult="Result is not null" OnRun="RunReportAsync" OnCancel="Cancel" OnExport="ExportAsync" />
+
+    @if (Result is not null && !Running)
+    {
+        <div class="filters">
+            <FilterMulti Label="Subscriptions" Options="SubscriptionOptions" Selected="SelectedSubscriptions" OnChanged="StateHasChanged" />
+            <FilterMulti Label="Regio's" Options="RegionOptions" Selected="SelectedRegions" OnChanged="StateHasChanged" />
+            <FilterChecks Label="Soort" Options="TypeOptions" Excluded="ExcludedTypes" OnChanged="StateHasChanged" />
+            <label class="filter-select grow">
+                <span class="label">Zoeken</span>
+                <input class="input" placeholder="Naam, resourcegroep, tag…" @bind="Filter" @bind:event="oninput" />
+            </label>
+            @if (Acknowledgements.IsEnabled)
+            {
+                <label class="filter-select">
+                    <span class="label">Aanvaard</span>
+                    <select class="input @(_ackView != AckView.Open ? "active" : "")" @bind="_ackView">
+                        <option value="@AckView.Open">Niet aanvaard (@(Result.Items.Count - AcknowledgedCount))</option>
+                        <option value="@AckView.Accepted">Alleen aanvaard (@AcknowledgedCount)</option>
+                        <option value="@AckView.All">Alle (@Result.Items.Count)</option>
+                    </select>
+                </label>
+            }
+            @if (HasActiveFilters)
+            {
+                <button class="btn link" @onclick="ClearFilters">Filters wissen</button>
+            }
+        </div>
+    }
+
+    <ErrorBox Error="Error" />
+
+    @if (Result is not null)
+    {
+        <WarningList Items="Result.Warnings" />
+        @if (Acknowledgements.IsEnabled && (SelectedVisible.Count > 0 || _bulkRunning))
+        {
+            <div class="bulk-bar">
+                @if (_bulkRunning)
+                {
+                    <span class="muted">@_bulkStatus</span>
+                }
+                else
+                {
+                    <strong>@SelectedVisible.Count geselecteerd</strong>
+                    <input class="input" placeholder="Reden voor alle geselecteerde (optioneel)" maxlength="500" @bind="_bulkReason" @bind:event="oninput" />
+                    <button class="btn primary" @onclick="AcknowledgeSelectedAsync">Aanvaarden</button>
+                    <button class="btn link" @onclick="() => _selected.Clear()">Selectie wissen</button>
+                }
+            </div>
+        }
+        @if (_ackError is not null)
+        {
+            <div class="alert error">@_ackError</div>
+        }
+        <p class="summary">
+            <strong>@Filtered.Count</strong> ongebruikte resource(s)
+            @if (Filtered.Count != Result.Items.Count) { <span class="muted"> van @Result.Items.Count</span> }
+            @if (AcknowledgedCount > 0 && _ackView == AckView.Open) { <span class="muted"> · @AcknowledgedCount aanvaard en verborgen</span> }
+            <span class="muted"> · gegenereerd @Result.GeneratedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </p>
+
+        @if (Filtered.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            @if (Acknowledgements.IsEnabled)
+                            {
+                                <th class="select-col">
+                                    @if (SelectableVisible.Count > 0)
+                                    {
+                                        <input type="checkbox" title="Alles (zichtbaar en nog niet aanvaard) selecteren" disabled="@_bulkRunning"
+                                               checked="@(SelectedVisible.Count == SelectableVisible.Count)" @onchange="ToggleAll" />
+                                    }
+                                </th>
+                            }
+                            <th class="sortable" @onclick='() => SortBy("kind")'>Soort@(SortIndicator("kind"))</th>
+                            <th class="sortable" @onclick='() => SortBy("name")'>Naam@(SortIndicator("name"))</th>
+                            <th class="sortable" @onclick='() => SortBy("rg")'>Resourcegroep@(SortIndicator("rg"))</th>
+                            <th class="sortable" @onclick='() => SortBy("subscription")'>Subscription@(SortIndicator("subscription"))</th>
+                            <th class="sortable" @onclick='() => SortBy("location")'>Regio@(SortIndicator("location"))</th>
+                            <th class="sortable" @onclick='() => SortBy("created")'>Aangemaakt@(SortIndicator("created"))</th>
+                            <th>Actie</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in Filtered)
+                        {
+                            var r = item.Resource;
+                            var ack = _acks.GetValueOrDefault(r.Id);
+                            <tr class="@(ack is not null ? "acknowledged" : _selected.Contains(r.Id) ? "selected" : null)">
+                                @if (Acknowledgements.IsEnabled)
+                                {
+                                    <td class="select-col">
+                                        @if (ack is null)
+                                        {
+                                            <input type="checkbox" disabled="@(_bulkRunning || _ackBusy.Contains(r.Id))"
+                                                   checked="@_selected.Contains(r.Id)" @onchange="e => Toggle(r.Id, e)" />
+                                        }
+                                    </td>
+                                }
+                                <td><span class="badge">@item.Kind</span></td>
+                                <td>
+                                    <a href="@Portal.ResourceUrl(Session.Account!.TenantId, r.Id)" target="_blank" rel="noopener"><strong>@r.Name</strong></a>
+                                    @if (item.Detail is not null) { <div class="muted small">@item.Detail</div> }
+                                    @if (item.ManagedBy is not null) { <div><span class="badge warn" title="@item.ManagedBy">Managed by</span></div> }
+                                </td>
+                                <td>@r.ResourceGroup</td>
+                                <td>@r.SubscriptionName</td>
+                                <td>@r.Location</td>
+                                <td class="small">@(item.CreatedTime?.ToLocalTime().ToString("yyyy-MM-dd") ?? "–")</td>
+                                <td class="action-cell">
+                                    <CopyCommand Command="@item.AzCli" />
+                                @if (Acknowledgements.IsEnabled)
+                                {
+                                    <div class="ack-cell">
+                                        @if (_ackBusy.Contains(r.Id))
+                                        {
+                                            <span class="muted small">Bezig…</span>
+                                        }
+                                        else if (ack is not null)
+                                        {
+                                            <div><span class="badge ok">Aanvaard</span></div>
+                                            <div class="muted small">@ack.AcknowledgedBy · @ack.AcknowledgedAt.ToLocalTime().ToString("yyyy-MM-dd")</div>
+                                            @if (ack.Reason is not null) { <div class="small">@ack.Reason</div> }
+                                            <button class="btn tiny" @onclick="() => RevokeAsync(item)">Intrekken</button>
+                                        }
+                                        else if (_ackEditId == r.Id)
+                                        {
+                                            <input class="input small" placeholder="Reden (optioneel)" maxlength="500" @bind="_ackReason" @bind:event="oninput" />
+                                            <div class="row-actions" style="justify-content:flex-start;margin-top:.3rem">
+                                                <button class="btn tiny primary" @onclick="() => AcknowledgeAsync(item)">Bevestig</button>
+                                                <button class="btn tiny" @onclick="() => _ackEditId = null">Annuleer</button>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn tiny" title="Bewust zo laten: niet meer tonen in dit overzicht" @onclick="() => StartAcknowledge(r.Id)">Aanvaarden</button>
+                                        }
+                                    </div>
+                                }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    else if (!Running)
+    {
+        <div class="card muted">
+            Klik op <strong>Rapport uitvoeren</strong>. Eén Resource Graph-query zoekt over alle subscriptions naar resources die nergens aan hangen.
+            Ongekoppelde disks, public IP's en lege App Service plans kosten geld zonder iets te doen. Maak van een disk eerst een snapshot als
+            je twijfelt, en verwijder geen resources met <em>Managed by</em>.
+        </div>
+    }
+</SignInRequired>
+
+@code {
+    private Dictionary<string, Acknowledgement> _acks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _ackBusy = new(StringComparer.OrdinalIgnoreCase);
+    private enum AckView { Open, Accepted, All }
+    private AckView _ackView = AckView.Open;
+    private string? _ackEditId;
+    private string _ackReason = "";
+    private string? _ackError;
+
+    // ---- Bulk acknowledge: one reason for all selected (visible, not yet accepted) resources.
+    private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
+    private string _bulkReason = "";
+    private bool _bulkRunning;
+    private string? _bulkStatus;
+
+    private List<UnusedResource> SelectableVisible => Filtered.Where(i => !_acks.ContainsKey(i.Resource.Id)).ToList();
+
+    private List<UnusedResource> SelectedVisible => SelectableVisible.Where(i => _selected.Contains(i.Resource.Id)).ToList();
+
+    private void Toggle(string id, ChangeEventArgs e)
+    {
+        if (e.Value is true) _selected.Add(id); else _selected.Remove(id);
+    }
+
+    private void ToggleAll(ChangeEventArgs e)
+    {
+        var ids = SelectableVisible.Select(i => i.Resource.Id);
+        if (e.Value is true) _selected.UnionWith(ids); else _selected.ExceptWith(ids);
+    }
+
+    private async Task RunReportAsync()
+    {
+        _selected.Clear();
+        _bulkReason = "";
+        await RunAsync();
+    }
+
+    private async Task AcknowledgeSelectedAsync()
+    {
+        var items = SelectedVisible;
+        var reason = _bulkReason;
+        _ackError = null;
+        _bulkRunning = true;
+        var failed = new List<string>();
+        try
+        {
+            for (var n = 0; n < items.Count; n++)
+            {
+                var item = items[n];
+                var id = item.Resource.Id;
+                _bulkStatus = $"Aanvaarden {n + 1}/{items.Count}…";
+                _ackBusy.Add(id);
+                StateHasChanged();
+                try
+                {
+                    _acks[id] = await Acknowledgements.AcknowledgeAsync(AcknowledgementReports.UnusedResources, id, item.Resource.Name, item.Kind, reason);
+                    _selected.Remove(id);
+                }
+                catch (Exception ex)
+                {
+                    failed.Add($"{item.Resource.Name}: {ex.Message}");
+                }
+                finally
+                {
+                    _ackBusy.Remove(id);
+                }
+            }
+        }
+        finally
+        {
+            _bulkRunning = false;
+            _bulkStatus = null;
+        }
+        if (failed.Count > 0)
+            _ackError = $"{failed.Count} van {items.Count} niet aanvaard (blijven geselecteerd): {string.Join(" · ", failed.Take(3))}{(failed.Count > 3 ? " …" : "")}";
+        else
+            _bulkReason = "";
+    }
+
+    private int AcknowledgedCount => Result?.Items.Count(i => _acks.ContainsKey(i.Resource.Id)) ?? 0;
+
+    protected override async Task<ReportResult<UnusedResource>> ExecuteAsync(IProgress<string> progress, CancellationToken ct)
+    {
+        _ackError = null;
+        var report = Report.RunAsync(progress, ct);
+        if (Acknowledgements.IsEnabled)
+        {
+            try
+            {
+                _acks = await Acknowledgements.GetAsync(AcknowledgementReports.UnusedResources, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _acks = new(StringComparer.OrdinalIgnoreCase);
+                _ackError = $"Aanvaarde resources konden niet geladen worden, dus alles wordt getoond: {ex.Message}";
+            }
+        }
+        return await report;
+    }
+
+    // Default view hides accepted resources; the "Aanvaard" dropdown switches to only accepted or all.
+    protected override bool ExtraFilter(UnusedResource i) => _ackView switch
+    {
+        AckView.Open => !_acks.ContainsKey(i.Resource.Id),
+        AckView.Accepted => _acks.ContainsKey(i.Resource.Id),
+        _ => true,
+    };
+
+    private void StartAcknowledge(string id)
+    {
+        _ackEditId = id;
+        _ackReason = "";
+    }
+
+    private async Task AcknowledgeAsync(UnusedResource item)
+    {
+        var id = item.Resource.Id;
+        _ackEditId = null;
+        _ackError = null;
+        _ackBusy.Add(id);
+        try
+        {
+            _acks[id] = await Acknowledgements.AcknowledgeAsync(AcknowledgementReports.UnusedResources, id, item.Resource.Name, item.Kind, _ackReason);
+        }
+        catch (Exception ex)
+        {
+            _ackError = $"Aanvaarden van {item.Resource.Name} mislukt: {ex.Message}";
+        }
+        finally
+        {
+            _ackBusy.Remove(id);
+        }
+    }
+
+    private async Task RevokeAsync(UnusedResource item)
+    {
+        var id = item.Resource.Id;
+        _ackError = null;
+        _ackBusy.Add(id);
+        try
+        {
+            await Acknowledgements.RevokeAsync(AcknowledgementReports.UnusedResources, id, item.Resource.Name);
+            _acks.Remove(id);
+        }
+        catch (Exception ex)
+        {
+            _ackError = $"Intrekken voor {item.Resource.Name} mislukt: {ex.Message}";
+        }
+        finally
+        {
+            _ackBusy.Remove(id);
+        }
+    }
+
+    protected override Func<UnusedResource, (string? Key, string? Label)> SubscriptionSelector =>
+        i => (i.Resource.SubscriptionId, i.Resource.SubscriptionName);
+
+    protected override Func<UnusedResource, string?> RegionSelector => i => i.Resource.Location;
+
+    protected override Func<UnusedResource, string?> TypeSelector => i => i.Kind;
+
+    protected override IComparable? SortValue(UnusedResource i, string key) => key switch
+    {
+        "kind" => i.Kind,
+        "name" => i.Resource.Name.ToLowerInvariant(),
+        "rg" => i.Resource.ResourceGroup.ToLowerInvariant(),
+        "subscription" => i.Resource.SubscriptionName.ToLowerInvariant(),
+        "location" => i.Resource.Location,
+        "created" => i.CreatedTime,
+        _ => null,
+    };
+
+    protected override IEnumerable<string?> SearchFields(UnusedResource i) =>
+        [i.Resource.Name, i.Resource.ResourceGroup, i.Resource.SubscriptionName, i.Kind, i.Detail, i.ManagedBy, .. i.Tags.Select(t => $"{t.Key}: {t.Value}")];
+
+    private async Task ExportAsync()
+    {
+        var csv = Csv.Build(
+            ["Kind", "Name", "Detail", "ResourceGroup", "Subscription", "SubscriptionId", "Location", "CreatedTime", "AgeInDays", "ManagedBy", "Tags", "ResourceId", "AzCliDelete", "AcknowledgedBy", "AcknowledgedAt", "AcknowledgeReason"],
+            Filtered.Select(i => new[]
+            {
+                i.Kind, i.Resource.Name, i.Detail, i.Resource.ResourceGroup, i.Resource.SubscriptionName, i.Resource.SubscriptionId, i.Resource.Location,
+                i.CreatedTime?.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), i.AgeInDays?.ToString(), i.ManagedBy,
+                string.Join(", ", i.Tags.Select(t => $"{t.Key}={t.Value}")), i.Resource.Id, i.AzCli,
+                _acks.GetValueOrDefault(i.Resource.Id)?.AcknowledgedBy, _acks.GetValueOrDefault(i.Resource.Id)?.AcknowledgedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"),
+                _acks.GetValueOrDefault(i.Resource.Id)?.Reason,
+            }));
+        await DownloadCsvAsync($"ongebruikte-resources-{DateTime.Now:yyyyMMdd-HHmm}.csv", csv);
+    }
+}
